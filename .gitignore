@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Environment / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# OpenCode local state / session data
+opencode-data/
+*.db
+
+# OS
+.DS_Store

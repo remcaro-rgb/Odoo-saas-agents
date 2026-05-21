@@ -1,0 +1,33 @@
+# Long-running headless OpenCode service (plan decision 5).
+# Deploy from this directory:  cd opencode && fly deploy
+#
+# app name is a placeholder — create the app first:  fly apps create odoo-saas-opencode
+app = "odoo-saas-opencode"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  XDG_DATA_HOME = "/data"
+
+[http_service]
+  internal_port = 4096
+  force_https = true
+  # Long-running service — do NOT auto-stop; sessions must stay warm (plan §4.2).
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+# Durable volume for OpenCode session storage. Create it once before first deploy:
+#   fly volumes create opencode_data --region iad --size 3
+[mounts]
+  source = "opencode_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+# Secrets are NOT defined here — set them out-of-band so they never hit git:
+#   fly secrets set OPENCODE_GO_API_KEY=...  ANTHROPIC_API_KEY=...  OPENCODE_SERVER_PASSWORD=...
