@@ -7,11 +7,11 @@ Pure data structures — the orchestrator core routes on these. An adapter
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """The trigger kinds the orchestrator understands."""
 
     INTENT_CONFIRMED = "intent_confirmed"  # a spec PR was marked intent-confirmed
@@ -20,7 +20,7 @@ class EventType(str, Enum):
     CRON_SWEEP = "cron_sweep"              # the stale-PR sweep (Phase E)
 
 
-class SpecKind(str, Enum):
+class SpecKind(StrEnum):
     """How heavy the spec is — decides whether the planning pipeline runs in full."""
 
     DESIGN = "design"   # heavyweight design spec -> full /plan + /tasks pipeline

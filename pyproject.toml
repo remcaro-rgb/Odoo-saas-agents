@@ -10,6 +10,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 [build-system]
@@ -24,3 +26,14 @@ testpaths = ["tests"]
 markers = [
     "smoke: end-to-end test that needs a live OpenCode service (skipped without one)",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

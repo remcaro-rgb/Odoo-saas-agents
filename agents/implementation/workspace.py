@@ -10,8 +10,9 @@ of this offline-buildable slice.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Iterable, Protocol, runtime_checkable
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)

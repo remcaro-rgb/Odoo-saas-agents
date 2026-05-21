@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 
@@ -68,7 +69,7 @@ class OpenCodeClient:
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> "OpenCodeClient":
+    def __enter__(self) -> OpenCodeClient:
         return self
 
     def __exit__(self, *exc: object) -> None:

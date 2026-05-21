@@ -19,6 +19,8 @@ RUN npm install -g \
 RUN mkdir -p /root/.config/opencode
 COPY opencode.json /root/.config/opencode/opencode.json
 COPY AGENTS.md     /root/.config/opencode/AGENTS.md
+# Spec-Kit workflow exposed as OpenCode custom commands (speckit.plan, ...).
+COPY commands/     /root/.config/opencode/commands/
 
 # Session storage on a durable Fly volume (plan §4.2 — sessions must outlive a
 # restart). OpenCode keeps state under $XDG_DATA_HOME/opencode.

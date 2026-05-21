@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .coder import Coder, ImplementResult
 from .events import Event, EventType, SpecKind
 from .spec_mapper import detect_spec_kind, to_speckit
 from .speckit_driver import SpecKitDriver
@@ -36,6 +37,16 @@ class PlanningResult:
     findings: list[str] = field(default_factory=list)
 
 
+@dataclass
+class FlowResult:
+    """Outcome of the full implement flow (planning + coding)."""
+
+    status: str                          # "implemented" | "escalated"
+    stage: str                           # "planning" | "implement"
+    planning: PlanningResult
+    implement: ImplementResult | None = None
+
+
 def route(event: Event) -> str:
     """Map an event to its flow name. Only `implement` is built in Phase B."""
     return _FLOWS.get(event.type, "unsupported")
@@ -49,9 +60,15 @@ def feature_name(branch: str | None) -> str:
 class Orchestrator:
     """Drives the planning half of the implement flow over a Workspace + driver."""
 
-    def __init__(self, workspace: Workspace, driver: SpecKitDriver) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        driver: SpecKitDriver,
+        coder: Coder | None = None,
+    ) -> None:
         self.workspace = workspace
         self.driver = driver
+        self.coder = coder
 
     def run_planning(self, event: Event) -> PlanningResult:
         self.workspace.checkout(event.branch or "")
@@ -93,3 +110,22 @@ class Orchestrator:
         return PlanningResult(
             status="ready_to_implement", feature=feature, session_id=session.id
         )
+
+    def implement(self, event: Event, addon_prefix: str) -> FlowResult:
+        """The full implement flow: planning, then hand off to the coder loop.
+
+        Planning and coding share one OpenCode session — a design spec's session
+        is reused; a fix-brief (which skipped planning) gets one created here.
+        """
+        planning = self.run_planning(event)
+        if planning.status == "escalated":
+            return FlowResult("escalated", "planning", planning)
+
+        coder = self.coder or Coder(self.driver, self.workspace)
+        session_id = planning.session_id
+        if session_id is None:
+            session_id = self.driver.client.create_session(
+                title=f"impl/{planning.feature}"
+            ).id
+        impl = coder.implement(session_id, addon_prefix)
+        return FlowResult(impl.status, "implement", planning, impl)

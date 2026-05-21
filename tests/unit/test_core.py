@@ -87,3 +87,77 @@ def test_coherent_design_spec_commits_the_planning_artifacts(fake_client):
     assert "specs/spec-1500/plan.md" in committed
     assert "specs/spec-1500/tasks.md" in committed
     assert ws.commits[-1].message.startswith("[impl-agent] plan:")
+
+
+# -- the full implement flow: B (planning) + C (coder) wired together ----------
+_ACL_HEADER = (
+    "id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink\n"
+)
+
+
+def _clean_addon_files() -> dict[str, str]:
+    return {
+        "custom-addons/widget/__manifest__.py": (
+            "{'name': 'Widget', 'version': '19.0.1.0.0', 'depends': ['base'], "
+            "'data': ['security/ir.model.access.csv'], 'license': 'LGPL-3'}"
+        ),
+        "custom-addons/widget/models/widget.py": (
+            "class Widget(models.Model):\n    _name = 'widget.counter'\n"
+        ),
+        "custom-addons/widget/security/ir.model.access.csv": (
+            _ACL_HEADER + "access_w,a,model_widget_counter,base.group_user,1,1,1,1\n"
+        ),
+    }
+
+
+def test_implement_runs_planning_then_hands_off_to_the_coder(fake_client):
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).implement(
+        _design_event(), "custom-addons/widget/"
+    )
+    assert result.status == "implemented"
+    commands = [c["command"] for c in fake_client.commands]
+    assert "speckit.plan" in commands
+    assert "speckit.implement" in commands
+
+
+def test_implement_uses_a_single_session_for_planning_and_coding(fake_client):
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    Orchestrator(ws, SpecKitDriver(fake_client)).implement(
+        _design_event(), "custom-addons/widget/"
+    )
+    assert len(fake_client.created_sessions) == 1
+
+
+def test_implement_does_not_run_the_coder_when_planning_escalates(fake_client):
+    fake_client.set_command_result(
+        "speckit.analyze",
+        {"parts": [{"type": "text", "text": "CRITICAL: spec contradicts the model"}]},
+    )
+    ws = InMemoryWorkspace({"docs/superpowers/specs/widget-design.md": DESIGN_SPEC})
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).implement(
+        _design_event(), "custom-addons/widget/"
+    )
+    assert result.status == "escalated"
+    assert "speckit.implement" not in [c["command"] for c in fake_client.commands]
+
+
+def test_implement_fix_brief_skips_planning_but_still_codes(fake_client):
+    ws = InMemoryWorkspace(
+        {
+            "docs/superpowers/specs/login-fix.md": "## 1. Goal\nfix it",
+            **_clean_addon_files(),
+        }
+    )
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).implement(
+        _fix_event(), "custom-addons/widget/"
+    )
+    assert result.status == "implemented"
+    commands = [c["command"] for c in fake_client.commands]
+    assert "speckit.plan" not in commands
+    assert "speckit.implement" in commands
+    assert len(fake_client.created_sessions) == 1
