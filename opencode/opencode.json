@@ -36,7 +36,10 @@
     "bash": {
       "*": "allow",
       "rm -rf *": "deny",
-      "rm -fr *": "deny"
+      "rm -fr *": "deny",
+      "bash -c *": "deny",
+      "sh -c *": "deny",
+      "dash -c *": "deny"
     },
     "webfetch": "allow",
     "external_directory": "allow",
