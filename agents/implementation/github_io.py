@@ -16,7 +16,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any, Protocol, runtime_checkable
 
-from .commenter import escalation_notice, implementation_ready
+from .commenter import escalation_notice, human_commit_ping, implementation_ready
 from .core import FlowResult, IterationResult, Orchestrator
 from .events import Event, EventType
 from .github_adapter import event_from_webhook
@@ -54,6 +54,7 @@ class GitHubClient(Protocol):
     def add_label(self, pr: int, label: str) -> None: ...
     def pr_head_branch(self, pr: int) -> str: ...
     def pr_changed_files(self, pr: int) -> list[str]: ...
+    def pr_for_branch(self, branch: str) -> int | None: ...
 
 
 class FakeGitHubClient:
@@ -67,11 +68,13 @@ class FakeGitHubClient:
         self,
         branches: dict[int, str] | None = None,
         changed_files: dict[int, list[str]] | None = None,
+        prs: dict[str, int] | None = None,
     ) -> None:
         self.comments: list[tuple[int, str]] = []
         self.labels: list[tuple[int, str]] = []
         self._branches: dict[int, str] = dict(branches or {})
         self._changed_files: dict[int, list[str]] = dict(changed_files or {})
+        self._prs: dict[str, int] = dict(prs or {})
 
     def post_comment(self, pr: int, body: str) -> None:
         self.comments.append((pr, body))
@@ -84,6 +87,9 @@ class FakeGitHubClient:
 
     def pr_changed_files(self, pr: int) -> list[str]:
         return list(self._changed_files.get(pr, []))
+
+    def pr_for_branch(self, branch: str) -> int | None:
+        return self._prs.get(branch)
 
 
 class GhCliClient:
@@ -124,6 +130,13 @@ class GhCliClient:
         )
         return [line.strip() for line in out.splitlines() if line.strip()]
 
+    def pr_for_branch(self, branch: str) -> int | None:
+        out = self._gh(
+            "pr", "list", "--head", branch, "--state", "open",
+            "--json", "number", "--jq", ".[0].number // empty",
+        ).strip()
+        return int(out) if out else None
+
 
 def handle_webhook(
     event_name: str,
@@ -134,8 +147,8 @@ def handle_webhook(
     """GitHub entry point: map a webhook to an `Event`, run the matching flow,
     and write the outcome back to the PR.
 
-    Routes the two flows Phase D wires up — a reporter `issue_comment` and an
-    intent-confirmed (labeled) PR. Other webhooks return `None`.
+    Routes a reporter `issue_comment`, an intent-confirmed (labeled) PR, and a
+    human push to an agent branch. Other webhooks return `None`.
     """
     event = event_from_webhook(event_name, payload)
     if event is None:
@@ -144,6 +157,9 @@ def handle_webhook(
         return _handle_issue_comment(event, orchestrator, github)
     if event.type is EventType.INTENT_CONFIRMED:
         return _handle_intent_confirmed(event, orchestrator, github)
+    if event.type is EventType.HUMAN_PUSH:
+        _handle_human_commit(event, github)
+        return None
     return None
 
 
@@ -215,3 +231,18 @@ def _handle_intent_confirmed(
         )
         github.add_label(event.pr, ESCALATION_LABEL)
     return result
+
+
+def _handle_human_commit(event: Event, github: GitHubClient) -> None:
+    """A human pushed to an agent branch — ping the reporter to re-confirm.
+
+    The push webhook carries no PR number, so the PR is resolved from the head
+    branch; with no open PR for the branch there is nothing to ping.
+    """
+    if not event.branch:
+        return
+    pr = github.pr_for_branch(event.branch)
+    if pr is None:
+        return
+    sha = str((event.raw or {}).get("after", ""))
+    github.post_comment(pr, human_commit_ping(sha, event.actor or "someone"))

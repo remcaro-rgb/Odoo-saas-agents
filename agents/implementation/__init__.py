@@ -9,37 +9,47 @@
   iteration brain; `github_adapter`, `github_io` — the GitHub I/O layer (webhook
   in, comments/labels out); `provisioning` — OpenCode on a per-spec git checkout;
   `preview` — per-spec Fly preview environments.
+- Phase E: `observability` — structured event logs; `notifier` — escalation
+  routes; `cost` — per-PR cost tracking + spend cap; the human-commit flow
+  (`github_adapter` push -> `github_io` reporter ping).
 
-Phases E–F (human-commit/observability, canary) are not built yet.
+Phase F (canary rollout) is not built yet.
 """
 
 from .classifier import Classifier, CommentIntent, HeuristicClassifier
 from .coder import Coder
 from .core import Orchestrator, route
+from .cost import Budget, session_cost
 from .events import Event, EventType, SpecKind
 from .gate1 import CheckRunner, FakeCheckRunner, Gate1
 from .github_adapter import event_from_webhook
 from .github_io import FakeGitHubClient, GitHubClient, handle_webhook
+from .notifier import FakeNotifier, Notifier, notify_alert, notify_escalation
+from .observability import EventLog
 from .opencode_client import OpenCodeClient, OpenCodeError, Session
 from .preview import FakeFlyClient, FlyClient, PreviewEnv, PreviewManager
 from .speckit_driver import SpecKitDriver
 from .workspace import InMemoryWorkspace, Workspace
 
 __all__ = [
+    "Budget",
     "CheckRunner",
     "Classifier",
     "Coder",
     "CommentIntent",
     "Event",
+    "EventLog",
     "EventType",
     "FakeCheckRunner",
     "FakeFlyClient",
     "FakeGitHubClient",
+    "FakeNotifier",
     "FlyClient",
     "Gate1",
     "GitHubClient",
     "HeuristicClassifier",
     "InMemoryWorkspace",
+    "Notifier",
     "OpenCodeClient",
     "OpenCodeError",
     "Orchestrator",
@@ -51,5 +61,8 @@ __all__ = [
     "Workspace",
     "event_from_webhook",
     "handle_webhook",
+    "notify_alert",
+    "notify_escalation",
     "route",
+    "session_cost",
 ]

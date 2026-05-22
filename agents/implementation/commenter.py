@@ -39,3 +39,15 @@ def escalation_notice(reason: str, details: str = "") -> str:
     if details.strip():
         lines += ["", details.strip()]
     return _wrap("\n".join(lines))
+
+
+def human_commit_ping(sha: str, author: str) -> str:
+    """Posted when a human pushes to the agent's branch — asks the reporter to
+    re-review and re-confirm the change before the PR moves on (design §5.3)."""
+    short = sha[:8] if sha else "(unknown)"
+    lines = [
+        f"A human teammate (`{author}`) pushed commit `{short}` to this branch.",
+        "",
+        "Please re-review and re-confirm the change before it moves on.",
+    ]
+    return _wrap("\n".join(lines))
