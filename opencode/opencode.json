@@ -24,6 +24,7 @@
   "model": "opencode-go/deepseek-v4-pro",
   "small_model": "opencode-go/glm-5.1",
   "permission": {
+    "read": "allow",
     "edit": {
       "*": "allow",
       "infra/**": "deny",
@@ -32,8 +33,14 @@
       "**/Dockerfile": "deny",
       "saas_tenant_gate/security/**": "deny"
     },
-    "bash": "allow",
-    "webfetch": "allow"
+    "bash": {
+      "*": "allow",
+      "rm -rf *": "deny",
+      "rm -fr *": "deny"
+    },
+    "webfetch": "allow",
+    "external_directory": "allow",
+    "doom_loop": "deny"
   },
   "mcp": {}
 }
