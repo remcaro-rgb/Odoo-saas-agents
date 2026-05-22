@@ -1,0 +1,58 @@
+# Implementation Agent — "intent-confirmed" trigger.
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/` directory
+# (the repo spec PRs open against). It is version-controlled here, next to the
+# agent code, but is INERT in this repo — it is not under `.github/`. See
+# docs/TIER-1-RUNBOOK.md for the deploy steps, secrets and repo variables.
+#
+# Fires when a spec PR is labeled `intent-confirmed`; runs the implement flow.
+name: Implementation Agent - intent-confirmed
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  # Serialise the implement and iterate runs on one PR — they share this group
+  # so they never overlap. The human-commit ping uses its own group; it only
+  # reads and posts a comment, so it is safe to run alongside.
+  group: impl-agent-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  implement:
+    # Only the `intent-confirmed` label triggers the agent. The webhook adapter
+    # re-checks the label, so this guard only avoids spinning an idle runner.
+    if: github.event.label.name == 'intent-confirmed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the data-plane repo (PR head branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Implementation Agent
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
+
+      - name: Run the agent
+        env:
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
+          OPENCODE_SERVER_PASSWORD: ${{ secrets.OPENCODE_SERVER_PASSWORD }}
+          DATA_PLANE_REPO: ${{ github.repository }}
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          ROLLOUT_STAGE: ${{ vars.ROLLOUT_STAGE }}
+          ROLLOUT_FIXTURES: ${{ vars.ROLLOUT_FIXTURES }}
+          ROLLOUT_OPT_IN: ${{ vars.ROLLOUT_OPT_IN }}
+          GATE1_ENABLED: ${{ vars.GATE1_ENABLED }}
+          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+        run: python -m agents.implementation

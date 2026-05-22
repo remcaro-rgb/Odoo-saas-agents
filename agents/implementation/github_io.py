@@ -138,6 +138,39 @@ class GhCliClient:
         return int(out) if out else None
 
 
+class ShadowGitHubClient:
+    """A shadow-mode `GitHubClient`: real reads, recorded-but-not-sent writes.
+
+    The SHADOW rollout stage (see `rollout.py`) runs the agent's real flow — it
+    resolves the live PR's spec and drives OpenCode for real — but posts and
+    labels nothing. Reads delegate to a real `GitHubClient` (a `GhCliClient`);
+    writes are appended to `comments` / `labels` so the composition root can log
+    what *would* have been posted. This is the faithful "draft everything, send
+    nothing" client: the all-canned `FakeGitHubClient` cannot resolve a live PR,
+    so it can only shadow a pre-seeded fixture, not a real intent-confirmed PR.
+    """
+
+    def __init__(self, reader: GitHubClient) -> None:
+        self._reader = reader
+        self.comments: list[tuple[int, str]] = []
+        self.labels: list[tuple[int, str]] = []
+
+    def post_comment(self, pr: int, body: str) -> None:
+        self.comments.append((pr, body))  # drafted, not sent
+
+    def add_label(self, pr: int, label: str) -> None:
+        self.labels.append((pr, label))  # drafted, not sent
+
+    def pr_head_branch(self, pr: int) -> str:
+        return self._reader.pr_head_branch(pr)
+
+    def pr_changed_files(self, pr: int) -> list[str]:
+        return self._reader.pr_changed_files(pr)
+
+    def pr_for_branch(self, branch: str) -> int | None:
+        return self._reader.pr_for_branch(branch)
+
+
 def handle_webhook(
     event_name: str,
     payload: dict[str, Any],

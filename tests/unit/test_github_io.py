@@ -4,6 +4,7 @@ from agents.implementation.core import Orchestrator
 from agents.implementation.github_io import (
     FakeGitHubClient,
     GitHubClient,
+    ShadowGitHubClient,
     handle_webhook,
     resolve_spec_path,
 )
@@ -293,3 +294,51 @@ def test_handle_webhook_human_push_without_a_sha_still_pings(fake_client):
     payload = {"ref": "refs/heads/agent/spec-1500", "sender": {"login": "lead-dev"}}
     handle_webhook("push", payload, orch, github)
     assert github.comments and github.comments[0][0] == 17
+
+
+# -- ShadowGitHubClient (SHADOW rollout stage) ---------------------------------
+def test_shadow_github_client_satisfies_the_protocol():
+    assert isinstance(ShadowGitHubClient(FakeGitHubClient()), GitHubClient)
+
+
+def test_shadow_github_client_records_writes_without_sending_them():
+    """SHADOW stage: a comment / label is drafted and recorded, never sent —
+    the wrapped real client must see no write."""
+    reader = FakeGitHubClient()
+    shadow = ShadowGitHubClient(reader)
+    shadow.post_comment(17, "draft body")
+    shadow.add_label(17, "needs-human")
+    assert shadow.comments == [(17, "draft body")]
+    assert shadow.labels == [(17, "needs-human")]
+    assert reader.comments == []  # nothing reached the real client
+    assert reader.labels == []
+
+
+def test_shadow_github_client_delegates_reads_to_the_real_client():
+    """Reads are real — the agent must resolve the live PR's branch / files /
+    number to run a meaningful shadow."""
+    reader = FakeGitHubClient(
+        branches={17: "agent/spec-1500"},
+        changed_files={17: [_SPEC_PATH]},
+        prs={"agent/spec-1500": 17},
+    )
+    shadow = ShadowGitHubClient(reader)
+    assert shadow.pr_head_branch(17) == "agent/spec-1500"
+    assert shadow.pr_changed_files(17) == [_SPEC_PATH]
+    assert shadow.pr_for_branch("agent/spec-1500") == 17
+
+
+def test_handle_webhook_through_shadow_client_runs_but_posts_nothing(fake_client):
+    """A full implement flow run with a ShadowGitHubClient resolves the spec and
+    runs implement (recorded on the OpenCode fake) but posts no comment / label
+    to the wrapped real client — the faithful "draft, don't send" shadow."""
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    ws = InMemoryWorkspace({_SPEC_PATH: _DESIGN_SPEC, **_clean_addon_files()})
+    reader = FakeGitHubClient(changed_files={17: [_SPEC_PATH]})
+    shadow = ShadowGitHubClient(reader)
+    orch = Orchestrator(ws, SpecKitDriver(fake_client))
+    result = handle_webhook("pull_request", _intent_confirmed_payload(), orch, shadow)
+    assert result is not None and result.status == "implemented"
+    assert "speckit.implement" in [c["command"] for c in fake_client.commands]
+    assert shadow.comments and shadow.comments[0][0] == 17  # drafted
+    assert reader.comments == []  # but nothing sent to GitHub

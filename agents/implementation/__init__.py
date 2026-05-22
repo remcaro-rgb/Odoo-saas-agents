@@ -15,8 +15,13 @@
 
 - Phase F: `rollout` — the 4-stage canary gate (shadow -> fixtures -> opt-in ->
   default-on) and the AGENTS_ENABLED kill switch.
+
+- Runnable layer (Tier 1): `app` — the composition root + GitHub Actions entry
+  point (`python -m agents.implementation`) that reads a webhook event, consults
+  `rollout`, builds the real object graph, and calls `handle_webhook`.
 """
 
+from .app import AgentConfig, main, run
 from .classifier import Classifier, CommentIntent, HeuristicClassifier
 from .coder import Coder
 from .core import Orchestrator, route
@@ -24,7 +29,12 @@ from .cost import Budget, session_cost
 from .events import Event, EventType, SpecKind
 from .gate1 import CheckRunner, FakeCheckRunner, Gate1
 from .github_adapter import event_from_webhook
-from .github_io import FakeGitHubClient, GitHubClient, handle_webhook
+from .github_io import (
+    FakeGitHubClient,
+    GitHubClient,
+    ShadowGitHubClient,
+    handle_webhook,
+)
 from .notifier import FakeNotifier, Notifier, notify_alert, notify_escalation
 from .observability import EventLog
 from .opencode_client import OpenCodeClient, OpenCodeError, Session
@@ -34,6 +44,7 @@ from .speckit_driver import SpecKitDriver
 from .workspace import InMemoryWorkspace, Workspace
 
 __all__ = [
+    "AgentConfig",
     "Budget",
     "CheckRunner",
     "Classifier",
@@ -61,13 +72,16 @@ __all__ = [
     "RolloutDecision",
     "RolloutStage",
     "Session",
+    "ShadowGitHubClient",
     "SpecKind",
     "SpecKitDriver",
     "Workspace",
     "event_from_webhook",
     "handle_webhook",
+    "main",
     "notify_alert",
     "notify_escalation",
     "route",
+    "run",
     "session_cost",
 ]

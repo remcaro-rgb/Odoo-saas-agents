@@ -45,3 +45,26 @@ def test_from_env_defaults_to_enabled_shadow():
 
 def test_from_env_falls_back_to_shadow_on_an_unknown_stage():
     assert Rollout.from_env({"ROLLOUT_STAGE": "bogus"}).stage is RolloutStage.SHADOW
+
+
+def test_from_env_parses_the_fixtures_set():
+    """ROLLOUT_FIXTURES is a comma-separated list; surrounding whitespace is
+    trimmed so the FIXTURES stage is expressible from a single env var."""
+    rollout = Rollout.from_env(
+        {"ROLLOUT_STAGE": "fixtures", "ROLLOUT_FIXTURES": "spec-1, spec-2 ,spec-3"}
+    )
+    assert rollout.fixtures == frozenset({"spec-1", "spec-2", "spec-3"})
+
+
+def test_from_env_parses_the_opt_in_set():
+    rollout = Rollout.from_env(
+        {"ROLLOUT_STAGE": "opt_in", "ROLLOUT_OPT_IN": "repo-a,repo-b"}
+    )
+    assert rollout.opt_in == frozenset({"repo-a", "repo-b"})
+
+
+def test_from_env_target_sets_are_empty_when_unset_or_blank():
+    """Missing or blank/whitespace-only config yields empty sets, not a set
+    holding one empty string (which would be a hard-to-spot mis-match)."""
+    assert Rollout.from_env({}).fixtures == frozenset()
+    assert Rollout.from_env({"ROLLOUT_OPT_IN": "  , "}).opt_in == frozenset()

@@ -1,0 +1,54 @@
+# Implementation Agent — human-commit ping.
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/` directory
+# (the repo spec PRs open against). It is version-controlled here, next to the
+# agent code, but is INERT in this repo — it is not under `.github/`. See
+# docs/TIER-1-RUNBOOK.md for the deploy steps, secrets and repo variables.
+#
+# Fires on a push to an `agent/**` branch. A push by the implementation-bot is a
+# no-op (the adapter filters bot pushes); a human push pings the reporter to
+# re-confirm the PR.
+name: Implementation Agent - human-commit ping
+
+on:
+  push:
+    branches:
+      - "agent/**"
+
+concurrency:
+  group: impl-agent-push-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the data-plane repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Implementation Agent
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
+
+      - name: Run the agent
+        env:
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
+          OPENCODE_SERVER_PASSWORD: ${{ secrets.OPENCODE_SERVER_PASSWORD }}
+          DATA_PLANE_REPO: ${{ github.repository }}
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          ROLLOUT_STAGE: ${{ vars.ROLLOUT_STAGE }}
+          ROLLOUT_FIXTURES: ${{ vars.ROLLOUT_FIXTURES }}
+          ROLLOUT_OPT_IN: ${{ vars.ROLLOUT_OPT_IN }}
+          GATE1_ENABLED: ${{ vars.GATE1_ENABLED }}
+          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+        run: python -m agents.implementation

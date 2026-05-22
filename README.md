@@ -8,15 +8,18 @@ portable-runtime design.
 > Design doc: `Odoo/docs/2026-05-20-implementation-agent-alt-design.md`
 > (companion infographic: `…-alt-infographic.html`).
 
-## Status — Phase A (Headless harness): scaffolded
+## Status — Phases A–F built; Tier 1 (runnable layer) wired
 
-This repo currently contains the **Phase A scaffold only**. It is **not yet a working
-agent** and **not yet deployed**. Phase A stands up the harness everything else sits on;
-Phases B–F (the orchestrator logic) are not built yet.
+All six phases of the orchestrator (`agents/implementation/`) are built and unit-tested,
+and the OpenCode service is deployed and verified live. **Tier 1** adds the runnable
+layer — a composition root, the `python -m agents.implementation` entry point, and three
+GitHub Actions trigger workflows — turning the tested library into an agent that fires
+on a GitHub event.
 
-To make Phase A *live* you must provision three things this scaffold cannot create —
-an **OpenCode Go subscription**, an **Anthropic API key**, and a **Fly.io account/token** —
-then deploy and run the smoke test. **See [`docs/PHASE-A.md`](docs/PHASE-A.md).**
+To make the agent *live* you must provision the `implementation-bot` account, deploy the
+trigger workflows into the data-plane repo, and set the repo secrets, then run the canary
+rollout. **See [`docs/TIER-1-RUNBOOK.md`](docs/TIER-1-RUNBOOK.md)** (and
+[`docs/PHASE-A.md`](docs/PHASE-A.md) for the OpenCode service).
 
 ## Architecture (one paragraph)
 
@@ -37,14 +40,20 @@ opencode/            The long-running headless OpenCode service
   opencode.json        providers (OpenCode Go + frontier) + permission deny-list
   AGENTS.md            Odoo-specific coding rules for OpenCode
 agents/
-  implementation/
-    opencode_client.py thin HTTP client for the headless OpenCode server
+  implementation/      the orchestrator brain (Phases A–F) + the runnable layer
+    app.py               composition root + `python -m agents.implementation`
+    core.py              event routing + the plan / tasks / analyze pipeline
+    coder.py             the Odoo specialization + validation layer
+    opencode_client.py   thin HTTP client for the headless OpenCode server
+    ...                  speckit_driver, gate1, preview, classifier, rollout, …
+deploy/workflows/     GitHub Actions trigger workflows (deploy to the data-plane repo)
 .specify/             Spec-Kit scaffold (stock templates + scripts)
   memory/constitution.md   the project constitution (policy-as-code)
 tests/
   fixtures/            a trivial fixture spec
   smoke/               the Phase-A end-to-end smoke test
 docs/PHASE-A.md       Phase-A runbook: secrets, deploy, smoke, spike checklist
+docs/TIER-1-RUNBOOK.md  Tier-1 runbook: entry point, workflows, the bot account
 .env.example          the secrets you must provide (no values)
 ```
 
@@ -52,8 +61,9 @@ docs/PHASE-A.md       Phase-A runbook: secrets, deploy, smoke, spike checklist
 
 | | |
 |---|---|
-| ✅ Scaffolded | Dockerfile, fly.toml, opencode.json, AGENTS.md, constitution, `opencode_client.py`, `.specify/`, the smoke test + fixture |
-| ⛔ Needs you | OpenCode Go subscription, Anthropic key, Fly account/token; the deploy; running the smoke test |
-| ⏭ Later phases | the orchestrator (`core.py`, `speckit_driver.py`), `coder.py`, preview envs, the reporter loop (Phases B–F) |
+| ✅ Built & tested | The full orchestrator (Phases A–F), the runnable layer (`app.py`, `__main__.py`), the trigger workflows — 220 unit tests, ruff + mypy clean |
+| ✅ Live | The OpenCode service on Fly — Phase-A smoke, the B→C run, and the model-portability proof all verified |
+| ⛔ Needs you | The `implementation-bot` account; deploying the workflows; setting the repo secrets / variables |
+| ⏭ Later (Tier 2–3) | agentlab (Gate 1), preview-env infra, the Notifier webhook, the multi-week canary rollout |
 
-Next step: follow [`docs/PHASE-A.md`](docs/PHASE-A.md).
+Next step: follow [`docs/TIER-1-RUNBOOK.md`](docs/TIER-1-RUNBOOK.md).

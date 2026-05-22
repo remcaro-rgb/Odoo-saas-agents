@@ -15,6 +15,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+def _csv_set(raw: str | None) -> frozenset[str]:
+    """Parse a comma-separated env value into a set, dropping blank entries.
+
+    A blank or whitespace-only value (or a trailing comma) yields an empty set
+    rather than a set holding one empty string.
+    """
+    if not raw:
+        return frozenset()
+    return frozenset(item.strip() for item in raw.split(",") if item.strip())
+
+
 class RolloutStage(StrEnum):
     """The canary stages, in rollout order (design §13)."""
 
@@ -62,12 +73,19 @@ class Rollout:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Rollout:
         """Build a `Rollout` from the environment — `AGENTS_ENABLED` (the kill
-        switch) and `ROLLOUT_STAGE`. Missing or unknown config falls back to the
-        safest posture: enabled, but SHADOW-only."""
+        switch), `ROLLOUT_STAGE`, and the comma-separated `ROLLOUT_FIXTURES` /
+        `ROLLOUT_OPT_IN` target sets for the FIXTURES / OPT_IN stages. Missing or
+        unknown config falls back to the safest posture: enabled, but
+        SHADOW-only, with empty target sets."""
         source = env if env is not None else os.environ
         enabled = source.get("AGENTS_ENABLED", "true").strip().lower() != "false"
         try:
             stage = RolloutStage(source.get("ROLLOUT_STAGE", "shadow").strip().lower())
         except ValueError:
             stage = RolloutStage.SHADOW
-        return cls(stage=stage, enabled=enabled)
+        return cls(
+            stage=stage,
+            enabled=enabled,
+            fixtures=_csv_set(source.get("ROLLOUT_FIXTURES")),
+            opt_in=_csv_set(source.get("ROLLOUT_OPT_IN")),
+        )

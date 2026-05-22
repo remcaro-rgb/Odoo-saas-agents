@@ -1,0 +1,62 @@
+# Implementation Agent — reporter-iteration trigger.
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/` directory
+# (the repo spec PRs open against). It is version-controlled here, next to the
+# agent code, but is INERT in this repo — it is not under `.github/`. See
+# docs/TIER-1-RUNBOOK.md for the deploy steps, secrets and repo variables.
+#
+# Fires on a new PR comment; the agent classifies it and iterates / escalates.
+# (issue_comment workflows always run from the default branch's copy.)
+name: Implementation Agent - reporter iteration
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  # Same `impl-agent-pr-<n>` group as the implement workflow — iterations on a
+  # PR serialise against each other and against the initial implement run.
+  group: impl-agent-pr-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  iterate:
+    # issue_comment fires for issues *and* PRs; the agent only acts on PR
+    # comments. Skip plain-issue comments so we do not spin an idle runner.
+    if: github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the data-plane repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the PR's head branch
+        env:
+          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Implementation Agent
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
+
+      - name: Run the agent
+        env:
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
+          OPENCODE_SERVER_PASSWORD: ${{ secrets.OPENCODE_SERVER_PASSWORD }}
+          DATA_PLANE_REPO: ${{ github.repository }}
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          ROLLOUT_STAGE: ${{ vars.ROLLOUT_STAGE }}
+          ROLLOUT_FIXTURES: ${{ vars.ROLLOUT_FIXTURES }}
+          ROLLOUT_OPT_IN: ${{ vars.ROLLOUT_OPT_IN }}
+          GATE1_ENABLED: ${{ vars.GATE1_ENABLED }}
+          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+        run: python -m agents.implementation
