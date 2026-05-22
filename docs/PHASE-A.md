@@ -8,9 +8,11 @@ it works.
 
 ## Status
 
-**Scaffolded — not yet live.** Every code/config artifact exists in this repo. Three
-things must be provisioned by you (accounts and secrets cannot be created for you), then
-the service deployed and the smoke test run.
+**Live — verified end-to-end (2026-05-22).** The OpenCode service is deployed to Fly
+(`odoo-saas-opencode`, region `iad`) and the Phase-A smoke test passes against it: a
+headless, no-human run takes the fixture spec and produces the `hello.txt` file edit.
+The OpenCode Go provider, the `deepseek-v4-pro` model, the `build` agent, the `write`
+tool and the permission deny-list are all confirmed working live.
 
 ## What is scaffolded
 

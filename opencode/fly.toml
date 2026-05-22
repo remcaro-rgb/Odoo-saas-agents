@@ -10,6 +10,7 @@ primary_region = "iad"
 
 [env]
   XDG_DATA_HOME = "/data"
+  XDG_STATE_HOME = "/data"
 
 [http_service]
   internal_port = 4096

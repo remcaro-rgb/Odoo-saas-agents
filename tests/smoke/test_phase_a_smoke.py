@@ -63,8 +63,24 @@ def test_implement_trivial_spec_end_to_end(client: OpenCodeClient) -> None:
 
     assert result, "OpenCode returned an empty response"
 
-    diff = client.get_diff(session.id)
-    assert diff, "OpenCode produced no file changes for the fixture spec"
+    # Verify a file edit happened by inspecting the agent's tool calls.
+    # NOT via GET /session/:id/diff: that endpoint is git-relative, and the smoke
+    # workspace is a bare (non-git) directory, so it reports an empty diff even
+    # on a successful write. A completed write/edit tool call is the direct,
+    # git-independent proof that the harness produced the file edit.
+    file_edits = [
+        part
+        for message in client.list_messages(session.id)
+        for part in message.get("parts", [])
+        if isinstance(part, dict)
+        and part.get("type") == "tool"
+        and part.get("tool") in {"write", "edit"}
+        and part.get("state", {}).get("status") == "completed"
+    ]
+    assert file_edits, "OpenCode completed no file-editing tool call for the spec"
 
-    touched = " ".join(str(entry) for entry in diff)
-    assert "hello.txt" in touched, f"expected hello.txt in the diff, got: {touched[:300]}"
+    touched = " ".join(
+        str(part.get("state", {}).get("input", {}).get("filePath", ""))
+        for part in file_edits
+    )
+    assert "hello.txt" in touched, f"expected hello.txt to be written, got: {touched}"

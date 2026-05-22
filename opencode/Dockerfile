@@ -23,9 +23,11 @@ COPY AGENTS.md     /root/.config/opencode/AGENTS.md
 COPY commands/     /root/.config/opencode/commands/
 
 # Session storage on a durable Fly volume (plan §4.2 — sessions must outlive a
-# restart). OpenCode keeps state under $XDG_DATA_HOME/opencode.
-# VERIFY against the OpenCode docs that XDG_DATA_HOME covers the session DB.
-ENV XDG_DATA_HOME=/data
+# restart). OpenCode 1.15.7 keeps the session DB under $XDG_DATA_HOME/opencode;
+# XDG_STATE_HOME is pinned to /data too as insurance, since OpenCode has
+# signalled intent to move state/log files under XDG_STATE_HOME.
+ENV XDG_DATA_HOME=/data \
+    XDG_STATE_HOME=/data
 VOLUME ["/data"]
 
 WORKDIR /workspace
