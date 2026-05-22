@@ -11,6 +11,7 @@ Spec-Kit pipeline is ~10x heavier than needed for a tiny fix).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from .classifier import Classifier, CommentIntent, HeuristicClassifier
@@ -69,6 +70,29 @@ def route(event: Event) -> str:
 def feature_name(branch: str | None) -> str:
     """Derive a Spec-Kit feature name from a branch (`agent/spec-1500` -> `spec-1500`)."""
     return (branch or "").rsplit("/", 1)[-1] or "feature"
+
+
+# The first `custom-addons/<name>` path a spec mentions is the addon it targets.
+_ADDON_RE = re.compile(r"\bcustom-addons/([A-Za-z0-9_]+)")
+
+
+def addon_prefix_from_spec(spec_text: str, feature: str) -> str:
+    """Derive the addon prefix a spec targets.
+
+    Returns ``custom-addons/<name>/`` for the *first* ``custom-addons/<name>``
+    path the spec mentions. When the spec names no addon, falls back to the
+    feature name (``custom-addons/<feature>/``) so the prefix is always
+    deterministic — a webhook caller can omit it and let the orchestrator
+    resolve it.
+
+    "First mention" relies on the project's design-spec convention that the
+    `Scope of work` line (near the top of `_TEMPLATE-design.md`) names the
+    target addon before any dependency addon. A spec that mentions a dependency
+    addon first would mis-resolve — keep the target addon's path first.
+    """
+    match = _ADDON_RE.search(spec_text or "")
+    name = match.group(1) if match else feature
+    return f"custom-addons/{name}/"
 
 
 _SESSION_PATH = "specs/{feature}/.agent-session"
@@ -172,15 +196,23 @@ class Orchestrator:
             status="ready_to_implement", feature=feature, session_id=session.id
         )
 
-    def implement(self, event: Event, addon_prefix: str) -> FlowResult:
+    def implement(self, event: Event, addon_prefix: str | None = None) -> FlowResult:
         """The full implement flow: planning, then hand off to the coder loop.
 
         Planning and coding share one OpenCode session — a design spec's session
         is reused; a fix-brief (which skipped planning) gets one created here.
+
+        ``addon_prefix`` may be omitted: it is then derived from the spec via
+        `addon_prefix_from_spec`, so a webhook caller need not resolve it.
         """
         planning = self.run_planning(event)
         if planning.status == "escalated":
             return FlowResult("escalated", "planning", planning)
+
+        if addon_prefix is None:
+            addon_prefix = addon_prefix_from_spec(
+                self.workspace.read(event.spec_path or ""), planning.feature
+            )
 
         coder = self.coder or Coder(self.driver, self.workspace)
         session_id = planning.session_id

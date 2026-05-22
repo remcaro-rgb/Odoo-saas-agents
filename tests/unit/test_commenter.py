@@ -3,6 +3,7 @@
 from agents.implementation.commenter import (
     AGENT_MARKER,
     escalation_notice,
+    implementation_ready,
     iteration_update,
 )
 
@@ -36,3 +37,19 @@ def test_escalation_notice_works_without_details():
     out = escalation_notice("retry-cap-exceeded")
     assert "retry-cap-exceeded" in out
     assert AGENT_MARKER in out
+
+
+def test_implementation_ready_includes_the_summary():
+    out = implementation_ready("Implemented `custom-addons/equipment_checkout`.")
+    assert "custom-addons/equipment_checkout" in out
+    assert AGENT_MARKER in out
+
+
+def test_implementation_ready_includes_the_preview_url_when_given():
+    out = implementation_ready("did the thing", preview_url="https://pr-7.example.dev")
+    assert "https://pr-7.example.dev" in out
+
+
+def test_implementation_ready_omits_the_preview_line_without_a_url():
+    out = implementation_ready("did the thing")
+    assert "preview" not in out.lower()

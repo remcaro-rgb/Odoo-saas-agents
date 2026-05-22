@@ -21,6 +21,14 @@ def iteration_update(summary: str, preview_url: str | None = None) -> str:
     return _wrap("\n".join(lines))
 
 
+def implementation_ready(summary: str, preview_url: str | None = None) -> str:
+    """Posted after the agent implements a freshly intent-confirmed spec."""
+    lines = ["I've implemented this spec and pushed the code.", "", summary.strip()]
+    if preview_url:
+        lines += ["", f"**Preview:** {preview_url}"]
+    return _wrap("\n".join(lines))
+
+
 def escalation_notice(reason: str, details: str = "") -> str:
     """Posted when the agent escalates the PR to a human teammate."""
     lines = [

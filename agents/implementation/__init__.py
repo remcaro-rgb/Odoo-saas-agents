@@ -4,10 +4,10 @@
 - Phase B: `events`, `spec_mapper`, `workspace`, `speckit_driver`, `core` — the
   orchestrator and the plan/tasks/analyze pipeline.
 - Phase C: `odoo_rules`, `coder` — the deterministic Odoo specialization layer.
-- Phase D (in progress): `classifier`, `commenter`, `core.reporter_iteration` —
-  the reporter-iteration brain; `github_adapter`, `github_io` — the GitHub I/O
-  layer (webhook in, comments/labels out). The preview-env + workspace-
-  provisioning infra is still pending.
+- Phase D: `classifier`, `commenter`, `core.reporter_iteration` — the reporter-
+  iteration brain; `github_adapter`, `github_io` — the GitHub I/O layer (webhook
+  in, comments/labels out); `provisioning` — OpenCode on a per-spec git checkout;
+  `preview` — per-spec Fly preview environments.
 
 Phases E–F (human-commit/observability, canary) are not built yet.
 """
@@ -19,6 +19,7 @@ from .events import Event, EventType, SpecKind
 from .github_adapter import event_from_webhook
 from .github_io import FakeGitHubClient, GitHubClient, handle_webhook
 from .opencode_client import OpenCodeClient, OpenCodeError, Session
+from .preview import FakeFlyClient, FlyClient, PreviewEnv, PreviewManager
 from .speckit_driver import SpecKitDriver
 from .workspace import InMemoryWorkspace, Workspace
 
@@ -28,13 +29,17 @@ __all__ = [
     "CommentIntent",
     "Event",
     "EventType",
+    "FakeFlyClient",
     "FakeGitHubClient",
+    "FlyClient",
     "GitHubClient",
     "HeuristicClassifier",
     "InMemoryWorkspace",
     "OpenCodeClient",
     "OpenCodeError",
     "Orchestrator",
+    "PreviewEnv",
+    "PreviewManager",
     "Session",
     "SpecKind",
     "SpecKitDriver",

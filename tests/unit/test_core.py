@@ -4,6 +4,7 @@ from agents.implementation.classifier import CommentIntent
 from agents.implementation.core import (
     Orchestrator,
     SessionRecord,
+    addon_prefix_from_spec,
     feature_name,
     load_session,
     route,
@@ -204,6 +205,39 @@ def test_implement_persists_the_session_for_a_later_reporter_comment(fake_client
     record = load_session(ws, "spec-1500")
     assert record is not None
     assert record.session_id
+    assert record.addon_prefix == "custom-addons/widget/"
+
+
+# -- addon-prefix derivation (Phase D: intent_confirmed wiring) ----------------
+def test_addon_prefix_from_spec_uses_the_addon_the_spec_names():
+    spec = "Scope of work: a new addon at `custom-addons/equipment_checkout`."
+    assert (
+        addon_prefix_from_spec(spec, "spec-1500")
+        == "custom-addons/equipment_checkout/"
+    )
+
+
+def test_addon_prefix_from_spec_falls_back_to_the_feature_when_unnamed():
+    assert (
+        addon_prefix_from_spec(DESIGN_SPEC, "spec-1500") == "custom-addons/spec-1500/"
+    )
+
+
+def test_addon_prefix_from_spec_takes_the_first_addon_mentioned():
+    spec = "touches custom-addons/alpha, and later custom-addons/beta too"
+    assert addon_prefix_from_spec(spec, "spec-1") == "custom-addons/alpha/"
+
+
+def test_implement_derives_the_addon_prefix_from_the_spec_when_omitted(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    spec = DESIGN_SPEC + "\nThe addon lives at custom-addons/widget.\n"
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": spec, **_clean_addon_files()}
+    )
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).implement(_design_event())
+    assert result.status == "implemented"
+    record = load_session(ws, "spec-1500")
+    assert record is not None
     assert record.addon_prefix == "custom-addons/widget/"
 
 
