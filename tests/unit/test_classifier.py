@@ -68,3 +68,41 @@ def test_does_not_look_right_is_a_change_request():
     assert (
         _classify("This does not look right to me") is CommentIntent.CHANGE_REQUEST
     )
+
+
+def test_leading_imperative_verb_is_a_change_request():
+    assert _classify("Add a test for the empty case") is CommentIntent.CHANGE_REQUEST
+
+
+def test_polite_request_to_add_is_a_change_request():
+    """A change request mid-comment, phrased as a polite 'could you ...'."""
+    assert (
+        _classify("Looks good, but could you add error handling?")
+        is CommentIntent.CHANGE_REQUEST
+    )
+
+
+def test_leading_drop_is_a_change_request():
+    assert (
+        _classify("Drop the unused import in models.py")
+        is CommentIntent.CHANGE_REQUEST
+    )
+
+
+def test_incorrect_is_a_change_request():
+    assert _classify("The field label is incorrect") is CommentIntent.CHANGE_REQUEST
+
+
+def test_wont_work_is_a_change_request():
+    assert (
+        _classify("This won't work for archived records")
+        is CommentIntent.CHANGE_REQUEST
+    )
+
+
+def test_could_you_explain_is_still_a_question():
+    """A genuine 'could you explain' question must not read as a change request."""
+    assert (
+        _classify("Could you explain why it is on a separate tab?")
+        is CommentIntent.QUESTION
+    )

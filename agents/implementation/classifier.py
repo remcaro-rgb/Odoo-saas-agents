@@ -33,10 +33,26 @@ class Classifier(Protocol):
 # `change`/`move`/`fix` are phrase-anchored (`change the`, `move it`, ...) so the
 # bare words don't fire on approvals like "nothing to change here" / "move on".
 _CHANGE = re.compile(
-    r"\b(?:instead|rename|remove|delete|replace|revert|swap|"
+    r"\b(?:instead|rename|remove|delete|replace|revert|swap|incorrect|"
     r"change\s+(?:it|the|this|that)|move\s+(?:it|the|this|that)|"
     r"fix\s+(?:it|the|this|that)|make\s+it|needs?\s+to|"
+    r"won'?t\s+work|isn'?t\s+right|"
     r"don'?t|do\s+not|doesn'?t|does\s+not|should\s+be|shouldn'?t|wrong)\b",
+    re.IGNORECASE,
+)
+
+# Imperative request verbs common in PR review (not already covered by _CHANGE).
+_REQUEST_VERB = (
+    r"add|remove|rename|delete|drop|split|extract|simplify|replace|"
+    r"refactor|wrap|update|switch|use|handle|combine"
+)
+# A change request phrased as an imperative: a leading request verb ("Add a
+# test", "Drop the import") or a polite request anywhere ("could you add ...",
+# "can you rename ..."). The leading / polite anchoring keeps a bare verb used
+# as a noun in prose from firing.
+_REQUEST = re.compile(
+    rf"^\s*(?:please\s+|pls\s+)?(?:{_REQUEST_VERB})\b"
+    rf"|\b(?:please|pls|can|could|would)\s+(?:you\s+)?(?:{_REQUEST_VERB})\b",
     re.IGNORECASE,
 )
 # Approval signals.
@@ -66,7 +82,7 @@ class HeuristicClassifier:
         text = (comment or "").strip()
         if not text:
             return CommentIntent.NOISE
-        if _CHANGE.search(text):
+        if _CHANGE.search(text) or _REQUEST.search(text):
             return CommentIntent.CHANGE_REQUEST
         if text.endswith("?") or _QUESTION_LEAD.search(text):
             return CommentIntent.QUESTION
