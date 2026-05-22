@@ -10,9 +10,12 @@ Spec-Kit pipeline is ~10x heavier than needed for a tiny fix).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
+from .classifier import Classifier, CommentIntent, HeuristicClassifier
 from .coder import Coder, ImplementResult
+from .commenter import escalation_notice, iteration_update
 from .events import Event, EventType, SpecKind
 from .spec_mapper import detect_spec_kind, to_speckit
 from .speckit_driver import SpecKitDriver
@@ -47,6 +50,16 @@ class FlowResult:
     implement: ImplementResult | None = None
 
 
+@dataclass
+class IterationResult:
+    """Outcome of handling one reporter comment (Phase D)."""
+
+    intent: CommentIntent
+    status: str               # "iterated" | "acknowledged" | "escalated" | "ignored"
+    comment: str = ""         # the GitHub reply to post ("" = post nothing)
+    session_id: str | None = None
+
+
 def route(event: Event) -> str:
     """Map an event to its flow name. Only `implement` is built in Phase B."""
     return _FLOWS.get(event.type, "unsupported")
@@ -57,6 +70,42 @@ def feature_name(branch: str | None) -> str:
     return (branch or "").rsplit("/", 1)[-1] or "feature"
 
 
+_SESSION_PATH = "specs/{feature}/.agent-session"
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """What `reporter_iteration` needs to resume work on a feature's PR."""
+
+    session_id: str
+    addon_prefix: str
+
+
+def save_session(workspace: Workspace, feature: str, record: SessionRecord) -> None:
+    """Persist a feature's OpenCode session id + addon prefix, so a later reporter
+    comment can re-enter the same session and re-validate the same addon.
+
+    Written into the feature's branch so it survives the separate triggers a PR
+    sees over its life; committing it with the branch is Phase-D infra wiring.
+    """
+    payload = json.dumps(
+        {"session_id": record.session_id, "addon_prefix": record.addon_prefix}
+    )
+    workspace.write(_SESSION_PATH.format(feature=feature), payload + "\n")
+
+
+def load_session(workspace: Workspace, feature: str) -> SessionRecord | None:
+    """Return the saved `SessionRecord` for a feature, or None if absent/unreadable."""
+    path = _SESSION_PATH.format(feature=feature)
+    if not workspace.exists(path):
+        return None
+    try:
+        data = json.loads(workspace.read(path))
+        return SessionRecord(data["session_id"], data["addon_prefix"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 class Orchestrator:
     """Drives the planning half of the implement flow over a Workspace + driver."""
 
@@ -65,10 +114,12 @@ class Orchestrator:
         workspace: Workspace,
         driver: SpecKitDriver,
         coder: Coder | None = None,
+        classifier: Classifier | None = None,
     ) -> None:
         self.workspace = workspace
         self.driver = driver
         self.coder = coder
+        self.classifier: Classifier = classifier or HeuristicClassifier()
 
     def run_planning(self, event: Event) -> PlanningResult:
         self.workspace.checkout(event.branch or "")
@@ -127,5 +178,90 @@ class Orchestrator:
             session_id = self.driver.client.create_session(
                 title=f"impl/{planning.feature}"
             ).id
+        # Persist the session so a later reporter comment re-enters it (Phase D).
+        save_session(
+            self.workspace,
+            planning.feature,
+            SessionRecord(session_id, addon_prefix),
+        )
         impl = coder.implement(session_id, addon_prefix)
         return FlowResult(impl.status, "implement", planning, impl)
+
+    def reporter_iteration(self, event: Event) -> IterationResult:
+        """Handle a reporter's PR comment (Phase D).
+
+        Classify the comment, then act: a change request re-enters the saved
+        OpenCode session and re-runs `/implement` with the delta; a question
+        escalates to a human; an approval is acknowledged; noise is ignored.
+        """
+        self.workspace.checkout(event.branch or "")
+        feature = feature_name(event.branch)
+        comment = event.comment or ""
+        intent = self.classifier.classify(comment)
+
+        if intent is CommentIntent.CHANGE_REQUEST:
+            record = load_session(self.workspace, feature)
+            if record is None:
+                reason = "reporter-iteration-no-session"
+                self.workspace.escalate(
+                    reason,
+                    "a change was requested but no OpenCode session is on "
+                    "record for this PR",
+                )
+                return IterationResult(
+                    intent,
+                    "escalated",
+                    comment=escalation_notice(
+                        reason,
+                        "I could not find the original implementation session "
+                        "for this PR.",
+                    ),
+                )
+            # Feed the reporter's feedback into the session, then re-run the full
+            # coder loop so the iteration is Odoo-validated like the initial
+            # implementation — not a bare /implement.
+            self.driver.client.send_message(
+                record.session_id,
+                f"Reporter feedback on the PR — please address it:\n\n{comment}",
+            )
+            coder = self.coder or Coder(self.driver, self.workspace)
+            impl = coder.implement(record.session_id, record.addon_prefix)
+            if impl.status == "implemented":
+                return IterationResult(
+                    intent,
+                    "iterated",
+                    comment=iteration_update(
+                        "Re-implemented with your requested change."
+                    ),
+                    session_id=record.session_id,
+                )
+            return IterationResult(
+                intent,
+                "escalated",
+                comment=escalation_notice(
+                    "reporter-iteration-failed-validation",
+                    "I re-implemented your change, but it still fails Odoo "
+                    "validation — flagging for a human.",
+                ),
+                session_id=record.session_id,
+            )
+
+        if intent is CommentIntent.QUESTION:
+            reason = "reporter-question"
+            self.workspace.escalate(
+                reason, "a reporter asked a question that needs a human response"
+            )
+            return IterationResult(
+                intent,
+                "escalated",
+                comment=escalation_notice(
+                    reason,
+                    "This looks like a question — I've flagged it for a human "
+                    "teammate.",
+                ),
+            )
+
+        if intent is CommentIntent.APPROVAL:
+            return IterationResult(intent, "acknowledged")
+
+        return IterationResult(intent, "ignored")

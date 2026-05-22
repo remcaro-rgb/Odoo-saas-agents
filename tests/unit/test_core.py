@@ -1,6 +1,14 @@
 """Unit tests for the orchestrator core (Phase B) — routing + the planning flow."""
 
-from agents.implementation.core import Orchestrator, feature_name, route
+from agents.implementation.classifier import CommentIntent
+from agents.implementation.core import (
+    Orchestrator,
+    SessionRecord,
+    feature_name,
+    load_session,
+    route,
+    save_session,
+)
 from agents.implementation.events import Event, EventType
 from agents.implementation.speckit_driver import SpecKitDriver
 from agents.implementation.workspace import InMemoryWorkspace
@@ -171,3 +179,112 @@ def test_implement_fix_brief_skips_planning_but_still_codes(fake_client):
     assert "speckit.plan" not in commands
     assert "speckit.implement" in commands
     assert len(fake_client.created_sessions) == 1
+
+
+# -- session persistence (Phase D) ---------------------------------------------
+def test_save_then_load_session_round_trips():
+    ws = InMemoryWorkspace()
+    record = SessionRecord("ses_abc123", "custom-addons/widget/")
+    save_session(ws, "spec-1500", record)
+    assert load_session(ws, "spec-1500") == record
+
+
+def test_load_session_returns_none_when_none_saved():
+    assert load_session(InMemoryWorkspace(), "spec-1500") is None
+
+
+def test_implement_persists_the_session_for_a_later_reporter_comment(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    Orchestrator(ws, SpecKitDriver(fake_client)).implement(
+        _design_event(), "custom-addons/widget/"
+    )
+    record = load_session(ws, "spec-1500")
+    assert record is not None
+    assert record.session_id
+    assert record.addon_prefix == "custom-addons/widget/"
+
+
+# -- reporter iteration (Phase D) ----------------------------------------------
+def _comment_event(comment: str) -> Event:
+    return Event(
+        type=EventType.ISSUE_COMMENT,
+        branch="agent/spec-1500",
+        pr=42,
+        comment=comment,
+    )
+
+
+def _addon_files_missing_acl() -> dict[str, str]:
+    """A clean addon, except the model has no ir.model.access.csv entry."""
+    files = _clean_addon_files()
+    files["custom-addons/widget/security/ir.model.access.csv"] = _ACL_HEADER
+    return files
+
+
+def test_reporter_iteration_change_request_runs_the_coder_loop(fake_client):
+    ws = InMemoryWorkspace(_clean_addon_files())
+    save_session(ws, "spec-1500", SessionRecord("ses_saved", "custom-addons/widget/"))
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).reporter_iteration(
+        _comment_event("Please rename the field to internal_note")
+    )
+    assert result.intent is CommentIntent.CHANGE_REQUEST
+    assert result.status == "iterated"
+    assert result.session_id == "ses_saved"
+    implements = [c for c in fake_client.commands if c["command"] == "speckit.implement"]
+    assert implements and implements[0]["session_id"] == "ses_saved"
+    assert any("internal_note" in text for _, text in fake_client.messages)
+    assert result.comment
+
+
+def test_reporter_iteration_change_request_escalates_when_validation_fails(fake_client):
+    ws = InMemoryWorkspace(_addon_files_missing_acl())
+    save_session(ws, "spec-1500", SessionRecord("ses_saved", "custom-addons/widget/"))
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).reporter_iteration(
+        _comment_event("Please rename the field")
+    )
+    assert result.status == "escalated"
+    assert ws.escalations
+
+
+def test_reporter_iteration_change_request_without_a_session_escalates(fake_client):
+    ws = InMemoryWorkspace()  # no saved session
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).reporter_iteration(
+        _comment_event("Please rename the field")
+    )
+    assert result.status == "escalated"
+    assert ws.escalations
+    assert fake_client.commands == []
+
+
+def test_reporter_iteration_question_escalates_to_a_human(fake_client):
+    ws = InMemoryWorkspace()
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).reporter_iteration(
+        _comment_event("Why is the note on a separate tab?")
+    )
+    assert result.intent is CommentIntent.QUESTION
+    assert result.status == "escalated"
+    assert ws.escalations
+    assert fake_client.commands == []
+
+
+def test_reporter_iteration_approval_is_acknowledged(fake_client):
+    ws = InMemoryWorkspace()
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).reporter_iteration(
+        _comment_event("LGTM, ship it")
+    )
+    assert result.status == "acknowledged"
+    assert ws.escalations == []
+    assert fake_client.commands == []
+
+
+def test_reporter_iteration_noise_is_ignored(fake_client):
+    ws = InMemoryWorkspace()
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).reporter_iteration(
+        _comment_event("thanks, appreciate it!")
+    )
+    assert result.status == "ignored"
+    assert ws.escalations == []
+    assert fake_client.commands == []
