@@ -13,7 +13,8 @@
   routes; `cost` — per-PR cost tracking + spend cap; the human-commit flow
   (`github_adapter` push -> `github_io` reporter ping).
 
-Phase F (canary rollout) is not built yet.
+- Phase F: `rollout` — the 4-stage canary gate (shadow -> fixtures -> opt-in ->
+  default-on) and the AGENTS_ENABLED kill switch.
 """
 
 from .classifier import Classifier, CommentIntent, HeuristicClassifier
@@ -28,6 +29,7 @@ from .notifier import FakeNotifier, Notifier, notify_alert, notify_escalation
 from .observability import EventLog
 from .opencode_client import OpenCodeClient, OpenCodeError, Session
 from .preview import FakeFlyClient, FlyClient, PreviewEnv, PreviewManager
+from .rollout import Rollout, RolloutDecision, RolloutStage
 from .speckit_driver import SpecKitDriver
 from .workspace import InMemoryWorkspace, Workspace
 
@@ -55,6 +57,9 @@ __all__ = [
     "Orchestrator",
     "PreviewEnv",
     "PreviewManager",
+    "Rollout",
+    "RolloutDecision",
+    "RolloutStage",
     "Session",
     "SpecKind",
     "SpecKitDriver",

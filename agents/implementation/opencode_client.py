@@ -39,6 +39,16 @@ def _text_part(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text}
 
 
+def _model_ref(model: str) -> dict[str, str]:
+    """Split a ``"<provider>/<model>"`` string into OpenCode's model object.
+
+    The message / command API rejects a bare string at ``model`` ("Expected
+    object | null") — it wants ``{"providerID": ..., "modelID": ...}``.
+    """
+    provider, _, model_id = model.partition("/")
+    return {"providerID": provider, "modelID": model_id}
+
+
 class OpenCodeClient:
     """Drives a headless OpenCode server over its REST + SSE API.
 
@@ -134,7 +144,7 @@ class OpenCodeClient:
         """
         body: dict[str, Any] = {"parts": [_text_part(text)]}
         if model:
-            body["model"] = model
+            body["model"] = _model_ref(model)
         if agent:
             body["agent"] = agent
         if system:
@@ -157,7 +167,7 @@ class OpenCodeClient:
         """
         body: dict[str, Any] = {"command": command, "arguments": arguments}
         if model:
-            body["model"] = model
+            body["model"] = _model_ref(model)
         if agent:
             body["agent"] = agent
         return self._request("POST", f"/session/{session_id}/command", json=body)
