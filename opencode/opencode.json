@@ -32,7 +32,14 @@
       "**/Dockerfile": "deny",
       "saas_tenant_gate/security/**": "deny"
     },
-    "bash": "allow",
+    "bash": {
+      "*": "allow",
+      "git push*": "deny",
+      "git reset --hard*": "deny",
+      "git clean*": "deny",
+      "rm -rf*": "deny",
+      "sudo*": "deny"
+    },
     "webfetch": "allow"
   },
   "mcp": {}

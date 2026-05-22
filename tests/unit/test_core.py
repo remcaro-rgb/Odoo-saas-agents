@@ -7,6 +7,12 @@ from agents.implementation.workspace import InMemoryWorkspace
 
 DESIGN_SPEC = "# Widget — Design Spec\n\n## 1. Goal\nAdd a widget counter.\n"
 
+# A clean /speckit.analyze report. Planning proceeds only when the spec/plan/tasks
+# set coheres, so happy-path tests must supply this — an empty report escalates.
+CLEAN_ANALYZE = {
+    "parts": [{"type": "text", "text": "Analysis complete. No inconsistencies found."}]
+}
+
 
 def _design_event() -> Event:
     return Event(
@@ -46,6 +52,7 @@ def test_fix_brief_takes_the_fast_path_and_skips_plan_and_tasks(fake_client):
 
 
 def test_design_spec_runs_plan_then_tasks_then_analyze(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace({"docs/superpowers/specs/widget-design.md": DESIGN_SPEC})
     result = Orchestrator(ws, SpecKitDriver(fake_client)).run_planning(_design_event())
     issued = [c["command"] for c in fake_client.commands]
@@ -74,6 +81,7 @@ def test_incoherent_analyze_escalates_and_does_not_commit(fake_client):
 
 
 def test_coherent_design_spec_commits_the_planning_artifacts(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace(
         {
             "docs/superpowers/specs/widget-design.md": DESIGN_SPEC,
@@ -111,6 +119,7 @@ def _clean_addon_files() -> dict[str, str]:
 
 
 def test_implement_runs_planning_then_hands_off_to_the_coder(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace(
         {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
     )
@@ -124,6 +133,7 @@ def test_implement_runs_planning_then_hands_off_to_the_coder(fake_client):
 
 
 def test_implement_uses_a_single_session_for_planning_and_coding(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace(
         {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
     )

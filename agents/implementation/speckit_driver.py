@@ -12,8 +12,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# Markers that, in an /analyze report, mean the spec/plan/tasks do not cohere.
-_INCOHERENCE = re.compile(r"critical|inconsisten|contradict|mismatch", re.IGNORECASE)
+# A finding marker in an /analyze report: a CRITICAL/HIGH severity label in
+# structural position — i.e. followed by ":", "|" (table cell), "]" or "-".
+# This deliberately does NOT match the words in prose, so a clean report that
+# says "no critical issues found" is not falsely flagged as incoherent.
+_FINDING = re.compile(r"\b(?:CRITICAL|HIGH)\b\s*[:\-\]|]", re.IGNORECASE)
 
 
 @dataclass
@@ -54,11 +57,21 @@ class SpecKitDriver:
         return self.client.run_command(session_id, self.TASKS, arguments)
 
     def run_analyze(self, session_id: str) -> AnalyzeResult:
-        """Run `/speckit.analyze` and classify the report as coherent or not."""
+        """Run `/speckit.analyze` and classify the report as coherent or not.
+
+        Empty output is treated as *not* coherent: a missing /analyze report is
+        not an implicit pass — the orchestrator must escalate, not proceed.
+        """
         result = self.client.run_command(session_id, self.ANALYZE, "")
         text = _text_of(result)
+        if not text.strip():
+            return AnalyzeResult(
+                coherent=False,
+                findings=["/analyze produced no output"],
+                raw="",
+            )
         findings = [
-            line.strip() for line in text.splitlines() if _INCOHERENCE.search(line)
+            line.strip() for line in text.splitlines() if _FINDING.search(line)
         ]
         return AnalyzeResult(coherent=not findings, findings=findings, raw=text)
 

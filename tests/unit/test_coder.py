@@ -129,3 +129,23 @@ def test_implement_routes_corrective_retries_to_the_frontier_model(fake_client):
     assert len(implements) == 4  # 1 initial + 3 corrective
     assert implements[0]["model"] is None
     assert all(c["model"] == "anthropic/claude-sonnet-4-6" for c in implements[1:])
+
+
+def test_implement_primes_the_session_with_odoo_context(fake_client):
+    """implement() injects the addon's Odoo context into the session before coding."""
+    ws = InMemoryWorkspace(_clean_addon())
+    Coder(SpecKitDriver(fake_client), ws).implement("sess-1", "custom-addons/widget/")
+    assert fake_client.messages, "expected an Odoo-context priming message"
+    session_id, text = fake_client.messages[0]
+    assert session_id == "sess-1"
+    assert "widget.counter" in text
+
+
+def test_implement_scaffolds_boilerplate_for_a_brand_new_addon(fake_client):
+    """A brand-new (empty) addon prefix gets correct-by-construction boilerplate."""
+    ws = InMemoryWorkspace()
+    result = Coder(SpecKitDriver(fake_client), ws).implement(
+        "sess-1", "custom-addons/newmod/"
+    )
+    assert ws.exists("custom-addons/newmod/__manifest__.py")
+    assert result.status == "implemented"

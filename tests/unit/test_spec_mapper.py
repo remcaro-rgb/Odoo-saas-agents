@@ -61,3 +61,14 @@ def test_detect_spec_kind_fix_by_filename():
 
 def test_detect_spec_kind_falls_back_to_design():
     assert detect_spec_kind("spec.md", "## 1. Goal\nDo a thing.") is SpecKind.DESIGN
+
+
+def test_find_does_not_match_a_needle_inside_a_word():
+    """The 'test' needle must not pick up an unrelated section like 'Latest'."""
+    spec = (
+        "# T\n\n"
+        "## Latest changes\nUnrelated release notes.\n\n"
+        "## 1. Goal\nThe real goal.\n"
+    )
+    out = to_speckit(spec)
+    assert "Unrelated release notes" not in out

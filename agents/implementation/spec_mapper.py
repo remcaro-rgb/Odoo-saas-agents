@@ -38,10 +38,16 @@ def parse_sections(md: str) -> dict[str, str]:
 
 
 def _find(sections: dict[str, str], *needles: str) -> str:
-    """Return the body of the first section whose heading contains any needle."""
+    """Return the body of the first section whose heading starts a word with any
+    needle.
+
+    The match is anchored to a word boundary at the start of the needle (only),
+    so 'test' matches 'Test plan' and 'Testing' but not 'Latest'; a trailing
+    boundary is deliberately not required, so 'non-goal' still matches 'Non-Goals'.
+    """
+    patterns = [re.compile(r"\b" + re.escape(n), re.IGNORECASE) for n in needles]
     for heading, body in sections.items():
-        low = heading.lower()
-        if any(needle in low for needle in needles):
+        if any(p.search(heading) for p in patterns):
             return body
     return ""
 

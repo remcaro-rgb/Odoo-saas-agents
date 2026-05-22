@@ -52,3 +52,30 @@ def test_run_implement_issues_the_command_with_the_routed_model(fake_client):
     assert cmd["command"] == "speckit.implement"
     assert cmd["arguments"] == "T001"
     assert cmd["model"] == "anthropic/claude-sonnet-4-6"
+
+
+def test_run_analyze_treats_a_no_issues_report_as_coherent(fake_client):
+    """A clean report that mentions 'no inconsistencies' must not be flagged."""
+    fake_client.set_command_result(
+        "speckit.analyze",
+        {
+            "parts": [
+                {
+                    "type": "text",
+                    "text": "Analysis complete. No inconsistencies found. "
+                    "No contradictions between spec and plan. No critical issues.",
+                }
+            ]
+        },
+    )
+    result = SpecKitDriver(fake_client).run_analyze("sess-1")
+    assert result.coherent is True
+    assert result.findings == []
+
+
+def test_run_analyze_treats_empty_output_as_not_coherent(fake_client):
+    """A missing /analyze report is not an implicit pass."""
+    fake_client.set_command_result("speckit.analyze", {"parts": []})
+    result = SpecKitDriver(fake_client).run_analyze("sess-1")
+    assert result.coherent is False
+    assert result.findings

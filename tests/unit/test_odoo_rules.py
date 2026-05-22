@@ -87,3 +87,47 @@ def test_parameterized_sql_passes():
 def test_mutable_default_argument_is_flagged():
     findings = check_orm_antipatterns("def f(self, items=[]):\n    return items\n")
     assert any(f.rule == "orm.mutable_default" for f in findings)
+
+
+def test_non_cursor_execute_is_not_mistaken_for_raw_sql():
+    """`.execute(` on something that is not a DB cursor (a wizard action, a
+    thread-pool, ...) is not raw SQL — only cursor `cr.execute(` calls are."""
+    code = 'def f(self):\n    self.action.execute(f"run {job}")\n'
+    assert check_orm_antipatterns(code) == []
+
+
+# -- model access: substring / false-positive regressions ---------------------
+def test_acl_substring_collision_does_not_mask_a_missing_entry():
+    """A model whose ACL token is a prefix of another's must still be flagged —
+    substring matching would let 'widget' ride on 'widget.counter''s entry."""
+    files = {
+        "models/widget.py": (
+            "class Widget(models.Model):\n    _name = 'widget'\n\n"
+            "class WidgetCounter(models.Model):\n    _name = 'widget.counter'\n"
+        ),
+        "security/ir.model.access.csv": (
+            "id,name,model_id:id,group_id:id,"
+            "perm_read,perm_write,perm_create,perm_unlink\n"
+            "access_wc,a,model_widget_counter,base.group_user,1,1,1,1\n"
+        ),
+    }
+    findings = check_model_access(files)
+    assert any("'widget'" in f.message for f in findings)
+    assert not any("'widget.counter'" in f.message for f in findings)
+
+
+def test_display_name_field_is_not_read_as_a_model_name():
+    """`display_name = 'X'` is a field default, not a model `_name` declaration."""
+    files = {
+        "models/widget.py": (
+            "class Widget(models.Model):\n"
+            "    _name = 'widget.counter'\n"
+            "    display_name = 'Widget'\n"
+        ),
+        "security/ir.model.access.csv": (
+            "id,name,model_id:id,group_id:id,"
+            "perm_read,perm_write,perm_create,perm_unlink\n"
+            "access_wc,a,model_widget_counter,base.group_user,1,1,1,1\n"
+        ),
+    }
+    assert check_model_access(files) == []

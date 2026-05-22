@@ -24,7 +24,8 @@ from .workspace import Workspace
 
 DEFAULT_FRONTIER_MODEL = "anthropic/claude-sonnet-4-6"
 
-_MODEL_NAME = re.compile(r"""_name\s*=\s*['"]([^'"]+)['"]""")
+# `\b` keeps a field like `display_name = 'X'` from being misread as a model.
+_MODEL_NAME = re.compile(r"""\b_name\s*=\s*['"]([^'"]+)['"]""")
 
 _MANIFEST_TEMPLATE = """{{
     'name': {name!r},
@@ -120,7 +121,17 @@ def correct(findings: list[Finding]) -> str:
 
 
 class Coder:
-    """Drives the Phase-C loop: implement -> validate -> correct, then escalate."""
+    """Drives the Phase-C loop: scaffold -> prime -> implement -> validate ->
+    correct, then escalate.
+
+    Workspace contract: the `Workspace` given here and the OpenCode session
+    passed to `implement()` MUST be backed by the *same* working tree. OpenCode's
+    `/implement` writes files into its own checkout; `implement()` then validates
+    those files by reading them back through this `Workspace`. If the two are not
+    one tree the validator sees stale state and the loop is meaningless.
+    `InMemoryWorkspace` simulates this for tests; in production the OpenCode
+    service must be pointed at the same git checkout the `GitWorkspace` manages.
+    """
 
     def __init__(
         self,
@@ -142,7 +153,23 @@ class Coder:
         }
 
     def implement(self, session_id: str, addon_prefix: str) -> ImplementResult:
-        """Run the initial implementation, then validate-and-correct up to the cap."""
+        """Scaffold (if new) -> prime the session -> implement -> validate/correct.
+
+        A brand-new addon (an empty `addon_prefix`) is first given correct-by-
+        construction Odoo boilerplate, so OpenCode starts from a valid manifest.
+        The session is then primed with the addon's Odoo context.
+        """
+        # Brand-new addon -> lay down correct-by-construction boilerplate first.
+        if not self.workspace.list_files(addon_prefix):
+            addon_name = addon_prefix.rstrip("/").rsplit("/", 1)[-1]
+            for path, content in scaffold(addon_name).items():
+                self.workspace.write(path, content)
+
+        # Prime the OpenCode session with the addon's current Odoo context.
+        self.driver.client.send_message(
+            session_id, inject_context(self.workspace, addon_prefix)
+        )
+
         # Initial implementation pass — routine work on the default (OpenCode Go) model.
         self.driver.run_implement(session_id)
 

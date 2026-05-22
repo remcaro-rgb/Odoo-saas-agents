@@ -8,13 +8,20 @@ whichever model OpenCode is running. `coder.py` orchestrates them.
 from __future__ import annotations
 
 import ast
+import csv
+import io
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 _REQUIRED_MANIFEST_KEYS = ("name", "version", "depends", "data", "license")
-_MODEL_NAME = re.compile(r"""_name\s*=\s*['"]([^'"]+)['"]""")
+# `\b` anchors the match to a real `_name` token, so a field like
+# `display_name = 'X'` is not misread as a model `_name` declaration.
+_MODEL_NAME = re.compile(r"""\b_name\s*=\s*['"]([^'"]+)['"]""")
 _MUTABLE_DEFAULT = re.compile(r"def\s+\w+\([^)]*=\s*(\[\]|\{\})")
+# A DB-cursor execute call — matches `cr.execute(` and `_cr.execute(`, so both
+# `self.env.cr` and `self._cr` are caught while non-cursor `.execute(` is not.
+_CURSOR_EXECUTE = re.compile(r"\b_?cr\.execute\(")
 
 
 @dataclass(frozen=True)
@@ -48,28 +55,36 @@ def check_manifest(content: str, path: str = "__manifest__.py") -> list[Finding]
 
 
 def check_model_access(files: dict[str, str]) -> list[Finding]:
-    """Every new `models.Model` has a matching `ir.model.access.csv` entry."""
+    """Every new `models.Model` has a matching `ir.model.access.csv` entry.
+
+    The CSV is parsed and its `model_id:id` column matched *exactly* (a bare
+    `model_x` or a module-qualified `mod.model_x`). A substring scan would let a
+    model ride on another model whose token it is a prefix of — e.g. a missing
+    entry for `widget` masked by a present `widget.counter`.
+    """
     model_names: set[str] = set()
     for file_path, content in files.items():
         if file_path.endswith(".py") and "models.Model" in content:
             model_names.update(_MODEL_NAME.findall(content))
 
-    acl = "".join(
-        content for p, content in files.items() if p.endswith("ir.model.access.csv")
-    )
+    granted: set[str] = set()
+    for path, content in files.items():
+        if not path.endswith("ir.model.access.csv"):
+            continue
+        for row in csv.DictReader(io.StringIO(content)):
+            ref = (row.get("model_id:id") or "").strip()
+            if ref:
+                granted.add(ref.rsplit(".", 1)[-1])  # tolerate a module prefix
 
-    findings: list[Finding] = []
-    for name in sorted(model_names):
-        token = "model_" + name.replace(".", "_")
-        if token not in acl:
-            findings.append(
-                Finding(
-                    "security.missing_acl",
-                    f"model '{name}' has no ir.model.access.csv entry",
-                    "error",
-                )
-            )
-    return findings
+    return [
+        Finding(
+            "security.missing_acl",
+            f"model '{name}' has no ir.model.access.csv entry",
+            "error",
+        )
+        for name in sorted(model_names)
+        if "model_" + name.replace(".", "_") not in granted
+    ]
 
 
 def check_view_xml(content: str, path: str = "") -> list[Finding]:
@@ -84,13 +99,14 @@ def check_view_xml(content: str, path: str = "") -> list[Finding]:
 
 
 def check_orm_antipatterns(content: str, path: str = "") -> list[Finding]:
-    """Flag raw-SQL string formatting and mutable default arguments."""
+    """Flag raw-SQL string formatting on a DB cursor and mutable default args."""
     findings: list[Finding] = []
     for lineno, line in enumerate(content.splitlines(), start=1):
         stripped = line.strip()
 
-        if ".execute(" in stripped:
-            after = stripped.split(".execute(", 1)[1]
+        match = _CURSOR_EXECUTE.search(stripped)
+        if match:
+            after = stripped[match.end() :]
             if after.startswith(("f'", 'f"')) or ".format(" in after:
                 findings.append(
                     Finding(
