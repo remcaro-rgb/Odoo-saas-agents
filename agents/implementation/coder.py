@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .gate1 import Gate1, Gate1Result
 from .odoo_rules import (
     Finding,
     check_manifest,
@@ -51,6 +52,7 @@ class ImplementResult:
     status: str  # "implemented" | "escalated"
     attempts: int
     findings: list[Finding] = field(default_factory=list)
+    gate: Gate1Result | None = None  # the Gate-1 outcome, when a gate ran
 
 
 # -- (1) deterministic scaffolding -------------------------------------------
@@ -120,9 +122,17 @@ def correct(findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
+def correct_gate1(result: Gate1Result) -> str:
+    """Turn Gate-1 check failures into a precise corrective re-prompt for OpenCode."""
+    lines = ["Gate 1 (build / lint / tests) failed. Fix exactly these — nothing else:"]
+    for check in result.failures:
+        lines.append(f"\n## {check.name} check failed\n{check.output}".rstrip())
+    return "\n".join(lines)
+
+
 class Coder:
     """Drives the Phase-C loop: scaffold -> prime -> implement -> validate ->
-    correct, then escalate.
+    Gate 1 -> correct, then escalate.
 
     Workspace contract: the `Workspace` given here and the OpenCode session
     passed to `implement()` MUST be backed by the *same* working tree. OpenCode's
@@ -140,11 +150,13 @@ class Coder:
         *,
         frontier_model: str = DEFAULT_FRONTIER_MODEL,
         max_retries: int = 3,
+        gate1: Gate1 | None = None,
     ) -> None:
         self.driver = driver
         self.workspace = workspace
         self.frontier_model = frontier_model
         self.max_retries = max_retries
+        self.gate1 = gate1
 
     def _addon_files(self, addon_prefix: str) -> dict[str, str]:
         return {
@@ -153,11 +165,15 @@ class Coder:
         }
 
     def implement(self, session_id: str, addon_prefix: str) -> ImplementResult:
-        """Scaffold (if new) -> prime the session -> implement -> validate/correct.
+        """Scaffold (if new) -> prime -> implement -> validate -> Gate 1.
 
         A brand-new addon (an empty `addon_prefix`) is first given correct-by-
         construction Odoo boilerplate, so OpenCode starts from a valid manifest.
-        The session is then primed with the addon's Odoo context.
+        The session is primed with the addon's Odoo context, then each attempt
+        runs the deterministic Odoo rules and — once they are clean — Gate 1
+        (build/lint/tests, when a `gate1` is configured). An Odoo-rule or Gate-1
+        failure drives a corrective re-prompt; persistent failure past
+        `max_retries` escalates.
         """
         # Brand-new addon -> lay down correct-by-construction boilerplate first.
         if not self.workspace.list_files(addon_prefix):
@@ -176,17 +192,25 @@ class Coder:
         for attempt in range(self.max_retries + 1):
             findings = validate_odoo(self._addon_files(addon_prefix))
             errors = [f for f in findings if f.severity == "error"]
-            if not errors:
-                return ImplementResult("implemented", attempt, findings)
+
+            if errors:
+                correction, stage, gate = correct(errors), "coder.py validation", None
+            else:
+                # Odoo rules are clean — run Gate 1 (build/lint/tests in agentlab).
+                gate = self.gate1.run(addon_prefix) if self.gate1 is not None else None
+                if gate is None or gate.passed:
+                    return ImplementResult("implemented", attempt, findings, gate)
+                correction, stage = correct_gate1(gate), "Gate 1"
+
             if attempt == self.max_retries:
                 self.workspace.escalate(
                     "needs-human",
-                    f"coder.py validation still failing after {attempt} corrective retries",
+                    f"{stage} still failing after {attempt} corrective retries",
                 )
-                return ImplementResult("escalated", attempt, findings)
+                return ImplementResult("escalated", attempt, findings, gate)
             # Corrective re-prompt — a hard task: route the retry to the frontier
             # model (plan decision 6).
             self.driver.run_implement(
-                session_id, correct(errors), model=self.frontier_model
+                session_id, correction, model=self.frontier_model
             )
         raise AssertionError("unreachable")  # pragma: no cover

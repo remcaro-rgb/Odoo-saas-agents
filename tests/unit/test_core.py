@@ -11,6 +11,7 @@ from agents.implementation.core import (
     save_session,
 )
 from agents.implementation.events import Event, EventType
+from agents.implementation.gate1 import FakeCheckRunner, Gate1
 from agents.implementation.speckit_driver import SpecKitDriver
 from agents.implementation.workspace import InMemoryWorkspace
 
@@ -357,3 +358,34 @@ def test_reporter_iteration_provisions_the_workspace_before_iterating(fake_clien
         ws, SpecKitDriver(fake_client), repo="GoliattCo/odoo-custom"
     ).reporter_iteration(_comment_event("Please rename the field"))
     assert any("GoliattCo/odoo-custom" in text for _, text in fake_client.messages)
+
+
+# -- Gate 1 wiring (Phase C) ---------------------------------------------------
+def test_implement_runs_gate1_when_the_orchestrator_has_one(fake_client):
+    """A Gate1 configured on the Orchestrator is threaded into the coder loop —
+    a failing Gate 1 escalates the implement flow."""
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    runner = FakeCheckRunner()
+    runner.set_result("ruff check", 1, "lint failure")
+    result = Orchestrator(
+        ws, SpecKitDriver(fake_client), gate1=Gate1(runner)
+    ).implement(_design_event(), "custom-addons/widget/")
+    assert result.status == "escalated"
+    assert result.stage == "implement"
+
+
+def test_implement_succeeds_when_the_orchestrators_gate1_passes(fake_client):
+    """A passing Gate-1 threaded from the Orchestrator lets implement complete."""
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    result = Orchestrator(
+        ws, SpecKitDriver(fake_client), gate1=Gate1(FakeCheckRunner())
+    ).implement(_design_event(), "custom-addons/widget/")
+    assert result.status == "implemented"
+    assert result.implement is not None
+    assert result.implement.gate is not None and result.implement.gate.passed

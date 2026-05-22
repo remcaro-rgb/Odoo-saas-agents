@@ -18,6 +18,7 @@ from .classifier import Classifier, CommentIntent, HeuristicClassifier
 from .coder import Coder, ImplementResult
 from .commenter import escalation_notice, iteration_update
 from .events import Event, EventType, SpecKind
+from .gate1 import Gate1
 from .provisioning import provision_workspace
 from .spec_mapper import detect_spec_kind, to_speckit
 from .speckit_driver import SpecKitDriver
@@ -141,12 +142,14 @@ class Orchestrator:
         coder: Coder | None = None,
         classifier: Classifier | None = None,
         repo: str | None = None,
+        gate1: Gate1 | None = None,
     ) -> None:
         self.workspace = workspace
         self.driver = driver
         self.coder = coder
         self.classifier: Classifier = classifier or HeuristicClassifier()
         self.repo = repo
+        self.gate1 = gate1
 
     def _provision(self, session_id: str, branch: str) -> None:
         """Check the agent branch out into the OpenCode session's workspace, when
@@ -214,7 +217,7 @@ class Orchestrator:
                 self.workspace.read(event.spec_path or ""), planning.feature
             )
 
-        coder = self.coder or Coder(self.driver, self.workspace)
+        coder = self.coder or Coder(self.driver, self.workspace, gate1=self.gate1)
         session_id = planning.session_id
         if session_id is None:
             session_id = self.driver.client.create_session(
@@ -268,7 +271,7 @@ class Orchestrator:
                 record.session_id,
                 f"Reporter feedback on the PR — please address it:\n\n{comment}",
             )
-            coder = self.coder or Coder(self.driver, self.workspace)
+            coder = self.coder or Coder(self.driver, self.workspace, gate1=self.gate1)
             impl = coder.implement(record.session_id, record.addon_prefix)
             if impl.status == "implemented":
                 return IterationResult(

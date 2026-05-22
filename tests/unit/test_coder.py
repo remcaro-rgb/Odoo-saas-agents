@@ -8,6 +8,7 @@ from agents.implementation.coder import (
     scaffold,
     validate_odoo,
 )
+from agents.implementation.gate1 import FakeCheckRunner, Gate1
 from agents.implementation.odoo_rules import Finding, check_manifest
 from agents.implementation.speckit_driver import SpecKitDriver
 from agents.implementation.workspace import InMemoryWorkspace
@@ -149,3 +150,43 @@ def test_implement_scaffolds_boilerplate_for_a_brand_new_addon(fake_client):
     )
     assert ws.exists("custom-addons/newmod/__manifest__.py")
     assert result.status == "implemented"
+
+
+# -- Gate 1 wiring ------------------------------------------------------------
+def test_implement_runs_gate1_after_the_odoo_rules_pass(fake_client):
+    """When a Gate1 is configured, it runs once the Odoo rules are clean."""
+    ws = InMemoryWorkspace(_clean_addon())
+    runner = FakeCheckRunner()
+    result = Coder(SpecKitDriver(fake_client), ws, gate1=Gate1(runner)).implement(
+        "sess-1", "custom-addons/widget/"
+    )
+    assert result.status == "implemented"
+    assert runner.commands  # Gate 1 actually ran its checks
+    assert result.gate is not None and result.gate.passed
+
+
+def test_implement_escalates_when_gate1_keeps_failing(fake_client):
+    """A clean addon (Odoo rules pass) whose Gate 1 keeps failing escalates."""
+    ws = InMemoryWorkspace(_clean_addon())
+    runner = FakeCheckRunner()
+    runner.set_result("ruff check", 1, "E501 line too long")
+    result = Coder(
+        SpecKitDriver(fake_client), ws, max_retries=2, gate1=Gate1(runner)
+    ).implement("sess-1", "custom-addons/widget/")
+    assert result.status == "escalated"
+    assert ws.escalations[-1].reason == "needs-human"
+    assert "Gate 1" in ws.escalations[-1].details
+
+
+def test_implement_reprompts_the_agent_with_the_gate1_failure(fake_client):
+    """A Gate-1 failure feeds a corrective /implement re-prompt carrying its logs."""
+    ws = InMemoryWorkspace(_clean_addon())
+    runner = FakeCheckRunner()
+    runner.set_result("ruff check", 1, "UNIQUE_LINT_MARKER")
+    Coder(
+        SpecKitDriver(fake_client), ws, max_retries=1, gate1=Gate1(runner)
+    ).implement("sess-1", "custom-addons/widget/")
+    implements = [
+        c for c in fake_client.commands if c["command"] == "speckit.implement"
+    ]
+    assert any("UNIQUE_LINT_MARKER" in c["arguments"] for c in implements)
