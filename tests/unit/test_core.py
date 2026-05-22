@@ -288,3 +288,38 @@ def test_reporter_iteration_noise_is_ignored(fake_client):
     assert result.status == "ignored"
     assert ws.escalations == []
     assert fake_client.commands == []
+
+
+# -- workspace provisioning wiring (Phase D) -----------------------------------
+def test_implement_provisions_the_workspace_when_a_repo_is_configured(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    Orchestrator(
+        ws, SpecKitDriver(fake_client), repo="GoliattCo/odoo-custom"
+    ).implement(_design_event(), "custom-addons/widget/")
+    assert any(
+        "GoliattCo/odoo-custom" in text and "agent/spec-1500" in text
+        for _, text in fake_client.messages
+    )
+
+
+def test_implement_does_not_provision_without_a_configured_repo(fake_client):
+    fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
+    ws = InMemoryWorkspace(
+        {"docs/superpowers/specs/widget-design.md": DESIGN_SPEC, **_clean_addon_files()}
+    )
+    Orchestrator(ws, SpecKitDriver(fake_client)).implement(
+        _design_event(), "custom-addons/widget/"
+    )
+    assert not any("GoliattCo" in text for _, text in fake_client.messages)
+
+
+def test_reporter_iteration_provisions_the_workspace_before_iterating(fake_client):
+    ws = InMemoryWorkspace(_clean_addon_files())
+    save_session(ws, "spec-1500", SessionRecord("ses_saved", "custom-addons/widget/"))
+    Orchestrator(
+        ws, SpecKitDriver(fake_client), repo="GoliattCo/odoo-custom"
+    ).reporter_iteration(_comment_event("Please rename the field"))
+    assert any("GoliattCo/odoo-custom" in text for _, text in fake_client.messages)

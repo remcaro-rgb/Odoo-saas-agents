@@ -17,6 +17,7 @@ from .classifier import Classifier, CommentIntent, HeuristicClassifier
 from .coder import Coder, ImplementResult
 from .commenter import escalation_notice, iteration_update
 from .events import Event, EventType, SpecKind
+from .provisioning import provision_workspace
 from .spec_mapper import detect_spec_kind, to_speckit
 from .speckit_driver import SpecKitDriver
 from .workspace import Workspace
@@ -115,11 +116,20 @@ class Orchestrator:
         driver: SpecKitDriver,
         coder: Coder | None = None,
         classifier: Classifier | None = None,
+        repo: str | None = None,
     ) -> None:
         self.workspace = workspace
         self.driver = driver
         self.coder = coder
         self.classifier: Classifier = classifier or HeuristicClassifier()
+        self.repo = repo
+
+    def _provision(self, session_id: str, branch: str) -> None:
+        """Check the agent branch out into the OpenCode session's workspace, when
+        a data-plane repo is configured (a no-op otherwise — e.g. in unit tests
+        and shadow mode)."""
+        if self.repo and branch:
+            provision_workspace(self.driver.client, session_id, self.repo, branch)
 
     def run_planning(self, event: Event) -> PlanningResult:
         self.workspace.checkout(event.branch or "")
@@ -184,6 +194,7 @@ class Orchestrator:
             planning.feature,
             SessionRecord(session_id, addon_prefix),
         )
+        self._provision(session_id, event.branch or "")
         impl = coder.implement(session_id, addon_prefix)
         return FlowResult(impl.status, "implement", planning, impl)
 
@@ -217,9 +228,10 @@ class Orchestrator:
                         "for this PR.",
                     ),
                 )
-            # Feed the reporter's feedback into the session, then re-run the full
-            # coder loop so the iteration is Odoo-validated like the initial
-            # implementation — not a bare /implement.
+            # Re-check out the branch, then feed the reporter's feedback into the
+            # session and re-run the full coder loop so the iteration is
+            # Odoo-validated like the initial implementation — not a bare /implement.
+            self._provision(record.session_id, event.branch or "")
             self.driver.client.send_message(
                 record.session_id,
                 f"Reporter feedback on the PR — please address it:\n\n{comment}",
