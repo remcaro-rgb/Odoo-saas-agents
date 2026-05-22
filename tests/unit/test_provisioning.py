@@ -25,3 +25,16 @@ def test_provision_workspace_targets_the_given_workdir(fake_client):
     )
     _, text = fake_client.messages[0]
     assert "cd /srv/checkout" in text
+
+
+def test_provision_workspace_sparse_excludes_the_protected_paths(fake_client):
+    """The checkout is sparse — the agent never receives the guardrail paths
+    (infra/, .github/, Dockerfile, saas_tenant_gate/security/) in its worktree,
+    so bash cannot modify the repo's copy of them."""
+    provision_workspace(fake_client, "sess-1", "acme/odoo", "main")
+    _, text = fake_client.messages[0]
+    assert "core.sparseCheckout true" in text
+    assert "!/infra/" in text
+    assert "!/.github/" in text
+    assert "!/Dockerfile" in text
+    assert "!/saas_tenant_gate/security/" in text
