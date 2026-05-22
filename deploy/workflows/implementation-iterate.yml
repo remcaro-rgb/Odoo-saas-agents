@@ -34,9 +34,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Mint a token for the implementation-bot GitHub App
+        id: bot_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.IMPLEMENTATION_BOT_APP_ID }}
+          private-key: ${{ secrets.IMPLEMENTATION_BOT_PRIVATE_KEY }}
+
       - name: Check out the PR's head branch
         env:
-          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token }}
         run: gh pr checkout ${{ github.event.issue.number }}
 
       - name: Set up Python
@@ -58,5 +65,5 @@ jobs:
           ROLLOUT_FIXTURES: ${{ vars.ROLLOUT_FIXTURES }}
           ROLLOUT_OPT_IN: ${{ vars.ROLLOUT_OPT_IN }}
           GATE1_ENABLED: ${{ vars.GATE1_ENABLED }}
-          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token }}
         run: python -m agents.implementation

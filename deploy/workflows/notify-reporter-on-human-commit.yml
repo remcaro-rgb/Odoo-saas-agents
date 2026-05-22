@@ -39,6 +39,13 @@ jobs:
       - name: Install the Implementation Agent
         run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
 
+      - name: Mint a token for the implementation-bot GitHub App
+        id: bot_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.IMPLEMENTATION_BOT_APP_ID }}
+          private-key: ${{ secrets.IMPLEMENTATION_BOT_PRIVATE_KEY }}
+
       - name: Run the agent
         env:
           OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
@@ -50,5 +57,5 @@ jobs:
           ROLLOUT_FIXTURES: ${{ vars.ROLLOUT_FIXTURES }}
           ROLLOUT_OPT_IN: ${{ vars.ROLLOUT_OPT_IN }}
           GATE1_ENABLED: ${{ vars.GATE1_ENABLED }}
-          GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token }}
         run: python -m agents.implementation

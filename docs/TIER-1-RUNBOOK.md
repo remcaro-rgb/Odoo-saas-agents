@@ -83,13 +83,14 @@ Set these on the **data-plane repo** (Settings → Secrets and variables → Act
 | `ROLLOUT_OPT_IN` | `acme/odoo` | Comma-separated target ids — used by the `opt_in` stage. |
 | `GATE1_ENABLED` | `false` | Keep `false` until agentlab exists (Tier 2). |
 | `AGENT_REF` | `main` | Git ref/tag of the agent package to install — pin a release tag for production. |
+| `IMPLEMENTATION_BOT_APP_ID` | `1234567` | The `implementation-bot` GitHub App's App ID — see §5. |
 
 **Repo secrets** (sensitive):
 
 | Secret | What |
 |---|---|
 | `OPENCODE_SERVER_PASSWORD` | The OpenCode server's HTTP Basic password. |
-| `IMPLEMENTATION_BOT_TOKEN` | The `implementation-bot` PAT — see §5. |
+| `IMPLEMENTATION_BOT_PRIVATE_KEY` | The `implementation-bot` GitHub App's private key — paste the full `.pem` contents (including the `-----BEGIN/END-----` lines). See §5. |
 
 The rollout `target` is the PR number (a push uses the branch). The `fixtures` /
 `opt_in` sets match against that id; `shadow` and `default_on` ignore it.
@@ -98,33 +99,53 @@ The rollout `target` is the PR number (a push uses the branch). The `fixtures` /
 > `provision_workspace`'s clone). That is set on the Fly app, not here — see
 > `docs/PHASE-A.md`.
 
-## 5. The `implementation-bot` service account — **you must do this**
+## 5. The `implementation-bot` GitHub App — **you must do this**
 
 The agent posts comments, applies labels, and (later) commits as a dedicated
-identity. **Creating accounts is something an agent must never do on your behalf**
-— this checklist is yours to complete.
+GitHub identity. **Creating accounts and registering apps is something an agent
+must never do on your behalf** — this checklist is yours to complete.
 
-1. **Create the account.** Create a GitHub *machine user* named
-   `implementation-bot` (a normal GitHub account dedicated to the agent). A
-   GitHub App also works — it pushes as `implementation-bot[bot]`, which the
-   webhook adapter already handles. A machine user is simpler for `gh` CLI auth.
-2. **Grant repo access.** Add `implementation-bot` to the data-plane repo as a
-   collaborator with **Write** access (needed to comment and label).
-3. **Create its token.** As the bot, create a fine-grained Personal Access Token
-   scoped to the data-plane repo with **Pull requests: read & write** and
-   **Issues: read & write** (comments + labels), plus **Contents: read**. Store
-   it as the `IMPLEMENTATION_BOT_TOKEN` repo secret (§4).
-4. **Set up signed commits** (design §10.1). Generate a GPG key for the bot, add
-   the public key to its GitHub account, and provide the private key as a Fly
-   secret on the OpenCode service so agent commits are GPG-signed. *(Needed once
-   the agent commits to a branch — the plan-artifact commits and the
-   implement→PR-branch push; see §7.)*
-5. **Verify it is recognised.** `implementation-bot` is already in `_BOT_LOGINS`
-   (`github_adapter.py`), so a push by the bot is correctly treated as the
-   agent's own work, not a human commit.
+1. **Register the App.** Go to `https://github.com/settings/apps/new`
+   (personal-owned data-plane repo) or
+   `https://github.com/organizations/<org>/settings/apps/new` (org-owned).
+   Name it `implementation-bot`. Set **Webhook → Active: OFF** (we use Actions
+   triggers, not App webhooks). **Where can this GitHub App be installed?** →
+   **Only on this account.**
+2. **Set repository permissions:** Metadata: Read · Pull requests: Read & write
+   · Issues: Read & write · Contents: Read (bump to Read & write once the
+   implement→push-back is wired — §7). No organization permissions, no event
+   subscriptions.
+3. **Generate a private key.** App settings page → **Generate a private key** →
+   save the downloaded `.pem` file (shown only once).
+4. **Note the App ID** at the top of the settings page (a number, e.g.
+   `1234567`).
+5. **Install the App on the data-plane repo.** Left sidebar of the App page →
+   **Install App** → **Install** → **Only select repositories** → pick the
+   data-plane repo.
+6. **Store the credentials** on the data-plane repo (§4): the App ID as the
+   `IMPLEMENTATION_BOT_APP_ID` repo *variable*, and the full PEM contents as the
+   `IMPLEMENTATION_BOT_PRIVATE_KEY` repo *secret*. The workflows mint a
+   short-lived (1 h) installation token at runtime via
+   `actions/create-github-app-token@v1`.
+7. **Signed commits** (design §10.1). GitHub Apps that commit via the REST API
+   get GitHub-signed "Verified" commits for free; committing via `git` from the
+   OpenCode container does not (the App identity has no GPG key). Decide the
+   commit path when implement→push-back is wired (§7); until then no commits
+   reach GitHub from the agent anyway.
+8. **Verify it is recognised.** The App pushes as `implementation-bot[bot]`;
+   `_BOT_LOGINS` in `github_adapter.py` strips the `[bot]` suffix, so the bot's
+   own pushes are correctly treated as non-human commits.
 
-The bot is **not required for a SHADOW dry run** (§6) — shadow posts nothing. It
+The App is **not required for a SHADOW dry run** (§6) — shadow posts nothing. It
 *is* required before the rollout reaches the `fixtures` stage (the first ACT).
+
+> **Alternative.** A GitHub *machine user* (a normal account with a fine-grained
+> PAT) also works — simpler to set up; the trade-offs are per-account PAT
+> rotation, coarser permissions, and a different signed-commits path. If you go
+> that way, store the PAT as `IMPLEMENTATION_BOT_TOKEN` and replace the
+> `Mint a token …` step in each workflow with
+> `GH_TOKEN: ${{ secrets.IMPLEMENTATION_BOT_TOKEN }}` directly on the consuming
+> steps.
 
 ## 6. Shadow-mode dry run
 
