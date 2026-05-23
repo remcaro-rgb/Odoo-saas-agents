@@ -176,7 +176,13 @@ class Coder:
         diffs = self.driver.client.get_diff(session_id) or []
         return self.workspace.apply_session_diff(diffs)
 
-    def implement(self, session_id: str, addon_prefix: str) -> ImplementResult:
+    def implement(
+        self,
+        session_id: str,
+        addon_prefix: str,
+        *,
+        spec_text: str = "",
+    ) -> ImplementResult:
         """Scaffold (if new) -> prime -> implement -> validate -> Gate 1.
 
         A brand-new addon (an empty `addon_prefix`) is first given correct-by-
@@ -186,6 +192,11 @@ class Coder:
         (build/lint/tests, when a `gate1` is configured). An Odoo-rule or Gate-1
         failure drives a corrective re-prompt; persistent failure past
         `max_retries` escalates.
+
+        ``spec_text`` is the directive the FIRST `/speckit.implement` carries
+        as its `$ARGUMENTS` — used by the fix-brief fast-path (which has no
+        plan.md / tasks.md). The design-spec path leaves it empty: /implement
+        reads plan.md / tasks.md instead.
         """
         # Brand-new addon -> lay down correct-by-construction boilerplate first.
         if not self.workspace.list_files(addon_prefix):
@@ -199,7 +210,10 @@ class Coder:
         )
 
         # Initial implementation pass — routine work on the default (OpenCode Go) model.
-        self.driver.run_implement(session_id)
+        # For a fix-brief, `spec_text` is the model's only directive (no
+        # plan.md / tasks.md exists); for a design spec it is "" and
+        # /implement reads the planning artifacts instead.
+        self.driver.run_implement(session_id, spec_text)
         # Sync OpenCode's writes into self.workspace BEFORE validation sees them.
         self._sync_from_session(session_id)
 

@@ -41,6 +41,11 @@ class PlanningResult:
     fast_path: bool = False
     session_id: str | None = None
     findings: list[str] = field(default_factory=list)
+    # Carried forward to `Coder.implement` so the fix-brief fast-path can hand
+    # the spec body to `/speckit.implement` as $ARGUMENTS — without it the
+    # fast-path's /implement has no plan.md / tasks.md to read and the model
+    # has no directive (the no-op outcome that PR #32's Tier-3 runs surfaced).
+    spec_text: str = ""
 
 
 @dataclass
@@ -180,9 +185,13 @@ class Orchestrator:
         kind = detect_spec_kind(event.spec_path or "", spec_text)
 
         # Fix-brief fast-path — skip the heavyweight /plan + /tasks pipeline.
+        # Carry the spec body forward as `spec_text`; `Coder.implement` will
+        # pass it to /speckit.implement as $ARGUMENTS (the fast-path has no
+        # plan.md / tasks.md, so $ARGUMENTS is the model's only directive).
         if kind is SpecKind.FIX:
             return PlanningResult(
-                status="ready_to_implement", feature=feature, fast_path=True
+                status="ready_to_implement", feature=feature,
+                fast_path=True, spec_text=spec_text,
             )
 
         # Design spec — full Spec-Kit planning pipeline.
@@ -248,7 +257,9 @@ class Orchestrator:
             SessionRecord(session_id, addon_prefix),
         )
         self._provision(session_id, event.branch or "")
-        impl = coder.implement(session_id, addon_prefix)
+        impl = coder.implement(
+            session_id, addon_prefix, spec_text=planning.spec_text,
+        )
         return FlowResult(
             impl.status, "implement", planning, impl,
             session_id=session_id, branch=event.branch,

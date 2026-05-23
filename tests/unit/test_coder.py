@@ -152,6 +152,40 @@ def test_implement_scaffolds_boilerplate_for_a_brand_new_addon(fake_client):
     assert result.status == "implemented"
 
 
+# -- fix-brief fast-path: spec body as /implement $ARGUMENTS (Tier-5) ---------
+def test_implement_passes_the_fix_brief_body_as_implement_arguments(fake_client):
+    """For a fix-brief (no plan.md / tasks.md), the coder hands the spec body
+    to `/speckit.implement` as its `$ARGUMENTS` so the model has a concrete
+    directive — closes the fix-brief productivity gap that made earlier
+    ACT runs no-ops on PRs #30 and #32."""
+    ws = InMemoryWorkspace(_clean_addon())
+    body = "## 1. Symptom\nThe widget is wonky.\n## 5. Proposed fix\nUnwonkify it.\n"
+    Coder(SpecKitDriver(fake_client), ws).implement(
+        "ses_x", "custom-addons/widget/", spec_text=body
+    )
+    implements = [
+        c for c in fake_client.commands if c["command"] == "speckit.implement"
+    ]
+    assert implements                          # at least one /implement call
+    # The FIRST /implement carries the spec body as arguments.
+    assert implements[0]["arguments"] == body
+
+
+def test_implement_default_spec_text_is_empty_arguments(fake_client):
+    """When no spec_text is passed (design-spec path, plan.md / tasks.md drive
+    /implement), the initial call goes out with empty arguments — preserves the
+    existing design-spec behaviour."""
+    ws = InMemoryWorkspace(_clean_addon())
+    Coder(SpecKitDriver(fake_client), ws).implement(
+        "ses_x", "custom-addons/widget/"
+    )
+    implements = [
+        c for c in fake_client.commands if c["command"] == "speckit.implement"
+    ]
+    assert implements
+    assert implements[0]["arguments"] == ""
+
+
 # -- session-diff sync (Tier-4 Action ⇄ container workspace sync) -------------
 def test_implement_syncs_opencode_session_diff_before_validation(fake_client):
     """After each `/speckit.implement`, the coder pulls OpenCode's session

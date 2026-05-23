@@ -61,6 +61,18 @@ def test_fix_brief_takes_the_fast_path_and_skips_plan_and_tasks(fake_client):
     assert fake_client.created_sessions == []  # no session opened
 
 
+def test_fix_brief_planning_preserves_spec_text_for_the_coder(fake_client):
+    """The fast-path skips /plan + /tasks, so /implement has no tasks.md or
+    plan.md to read. PlanningResult must carry the spec body forward so the
+    coder can pass it as $ARGUMENTS to /speckit.implement (Tier-5: fold the
+    fix-brief body into the implement directive)."""
+    body = "## 1. Symptom\nFoo is broken.\n\n## 5. Proposed fix\nDo bar.\n"
+    ws = InMemoryWorkspace({"docs/superpowers/specs/login-fix.md": body})
+    result = Orchestrator(ws, SpecKitDriver(fake_client)).run_planning(_fix_event())
+    assert result.fast_path is True
+    assert result.spec_text == body
+
+
 def test_design_spec_runs_plan_then_tasks_then_analyze(fake_client):
     fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace({"docs/superpowers/specs/widget-design.md": DESIGN_SPEC})
