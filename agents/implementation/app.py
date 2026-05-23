@@ -132,12 +132,21 @@ def build_opencode_client(config: AgentConfig) -> OpenCodeClient:
     )
 
 
-def build_orchestrator(config: AgentConfig, client: OpenCodeClient) -> Orchestrator:
+def build_orchestrator(
+    config: AgentConfig,
+    client: OpenCodeClient,
+    *,
+    decision: RolloutDecision = RolloutDecision.SHADOW,
+) -> Orchestrator:
     """Wire the orchestrator object graph over an OpenCode client.
 
     Gate 1 (the build / lint / test gate) is wired only when `GATE1_ENABLED` is
     set: it needs the agentlab Odoo environment, a later (Tier-2) seam. Until
     then `gate1` is `None` and the coder runs Odoo-rule validation only.
+
+    `decision` defaults to `SHADOW` — if a caller forgets to thread the rollout
+    decision through, the resulting orchestrator still suppresses the
+    container's autonomous push (the safer default; ACT must be explicit).
     """
     driver = SpecKitDriver(client)
     workspace = GitWorkspace(config.workspace_root)
@@ -154,7 +163,12 @@ def build_orchestrator(config: AgentConfig, client: OpenCodeClient) -> Orchestra
             gate1 = Gate1(runner, checks=(("lint", "ruff check {addon}"),))
     else:
         gate1 = None
-    return Orchestrator(workspace, driver, repo=config.data_plane_repo, gate1=gate1)
+    return Orchestrator(
+        workspace, driver,
+        repo=config.data_plane_repo,
+        gate1=gate1,
+        shadow=decision is RolloutDecision.SHADOW,
+    )
 
 
 def build_notifier(config: AgentConfig, decision: RolloutDecision) -> Notifier:
@@ -259,7 +273,7 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
 
     client = build_opencode_client(config)
     try:
-        orchestrator = build_orchestrator(config, client)
+        orchestrator = build_orchestrator(config, client, decision=decision)
         github = build_github(config.data_plane_repo, decision)
         result = handle_webhook(event_name, payload, orchestrator, github)
         # Push the implementation back to the PR head branch (Tier 2). The

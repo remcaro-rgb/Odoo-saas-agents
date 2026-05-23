@@ -148,6 +148,7 @@ class Orchestrator:
         classifier: Classifier | None = None,
         repo: str | None = None,
         gate1: Gate1 | None = None,
+        shadow: bool = False,
     ) -> None:
         self.workspace = workspace
         self.driver = driver
@@ -155,13 +156,22 @@ class Orchestrator:
         self.classifier: Classifier = classifier or HeuristicClassifier()
         self.repo = repo
         self.gate1 = gate1
+        # When True, `_provision` provisions the OpenCode container without
+        # leaving push auth on `origin` — SHADOW must mean "push nothing", and
+        # the container's autonomous git path would otherwise push using the
+        # Fly `GITHUB_TOKEN`. See `provisioning._provision_script` + runbook §7.
+        self.shadow = shadow
 
     def _provision(self, session_id: str, branch: str) -> None:
         """Check the agent branch out into the OpenCode session's workspace, when
         a data-plane repo is configured (a no-op otherwise — e.g. in unit tests
-        and shadow mode)."""
+        with no `repo`). When `shadow` is set the container loses push auth on
+        `origin` after the fetch (runbook §7)."""
         if self.repo and branch:
-            provision_workspace(self.driver.client, session_id, self.repo, branch)
+            provision_workspace(
+                self.driver.client, session_id, self.repo, branch,
+                shadow=self.shadow,
+            )
 
     def run_planning(self, event: Event) -> PlanningResult:
         self.workspace.checkout(event.branch or "")

@@ -183,6 +183,33 @@ def test_agent_config_reads_gate1_check_set_with_default_lint():
     )
 
 
+# -- build_orchestrator: shadow-aware provisioning (Tier-3) --------------------
+def test_build_orchestrator_default_is_shadow_mode(fake_client):
+    """The default decision is SHADOW — callers must opt INTO ACT explicitly.
+    Safer than the inverse: if someone forgets to thread the rollout
+    decision through, the orchestrator still suppresses the container's
+    autonomous push (Tier-3 / runbook §7)."""
+    config = AgentConfig.from_env({"DATA_PLANE_REPO": "acme/odoo"})
+    orch = build_orchestrator(config, fake_client)
+    assert orch.shadow is True
+
+
+def test_build_orchestrator_act_decision_disables_shadow(fake_client):
+    config = AgentConfig.from_env({"DATA_PLANE_REPO": "acme/odoo"})
+    orch = build_orchestrator(
+        config, fake_client, decision=RolloutDecision.ACT
+    )
+    assert orch.shadow is False
+
+
+def test_build_orchestrator_shadow_decision_keeps_shadow_true(fake_client):
+    config = AgentConfig.from_env({"DATA_PLANE_REPO": "acme/odoo"})
+    orch = build_orchestrator(
+        config, fake_client, decision=RolloutDecision.SHADOW
+    )
+    assert orch.shadow is True
+
+
 # -- build_github --------------------------------------------------------------
 def test_build_github_act_returns_a_real_client():
     github = build_github("acme/odoo", RolloutDecision.ACT)

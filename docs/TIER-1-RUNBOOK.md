@@ -196,14 +196,21 @@ the Action log: the structured records show what *would* have been posted.
   Until that runner exists, keep `GATE1_CHECK_SET=lint`.
 - **Notifier is unwired.** Slack escalation routes (`notifier.py`) are built but
   need a webhook secret (Tier 2). Escalations still post a GitHub comment + label.
-- **implement → PR-branch push.** *Wired* (`pushback.py`). After an
-  `implemented` / `iterated` outcome, the Action fetches OpenCode's session
-  diff, applies it to the data-plane checkout with `git apply`, commits as
-  `implementation-bot[bot]`, and pushes to the PR head branch using the App's
-  installation token. **Shadow-aware:** in SHADOW the function records what it
-  *would* have pushed (in the `push.shadowed` event record) and skips the
-  apply + commit + push. Requires the App's Contents permission to be
-  **Read & write** (§5 step 2) before any ACT-stage run.
+- **implement → PR-branch push.** *Wired* on two paths, both shadow-aware:
+  - **Action path** (`pushback.py`) — after an `implemented` / `iterated`
+    outcome, the Action fetches OpenCode's session diff, applies it to the
+    data-plane checkout, commits as `implementation-bot[bot]`, and pushes to
+    the PR head branch using the App's installation token. SHADOW logs
+    `push.shadowed` and skips. Requires App **Contents: Read & write** (§5
+    step 2) before any ACT.
+  - **Container path** (`provisioning.py`) — the OpenCode container's own
+    git can commit + push autonomously during `/implement` using the Fly
+    `GITHUB_TOKEN` secret. In SHADOW, `provision_workspace(shadow=True)`
+    rewrites `origin` to a token-less URL after the initial fetch, so any
+    subsequent autonomous `git push` from the container fails 401 — closing
+    the gap the FIXTURES-stage ACT smoke surfaced. Pass-through:
+    `build_orchestrator(..., decision=decision)` → `Orchestrator(shadow=…)`
+    → `_provision(shadow=…)` → `_provision_script(shadow=…)`.
 - **Cost cap not enforced at the entry point.** `cost.py` (`Budget`,
   `session_cost`) is built; wiring a durable per-PR spend cap into `run()` needs
   cross-run state (Tier 2/3).
