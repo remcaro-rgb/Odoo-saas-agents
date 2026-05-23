@@ -82,14 +82,21 @@ def apply_session_diff(
         return 0
     blob = "\n".join(pieces) + "\n"
     try:
-        _git(workspace_root, "apply", "--whitespace=nowarn", "-", stdin=blob)
+        # `-p0` keeps paths as-is. OpenCode's shadow-git unified diffs lack
+        # the `a/` / `b/` header prefixes that `git diff` emits, so the
+        # default `-p1` strips the first segment off (e.g.
+        # `custom-addons/x/__manifest__.py` -> `x/__manifest__.py`) and the
+        # apply fails with `No such file or directory`. Verified live
+        # 2026-05-23 against probe session ses_1a8f4c29effeUMS10Ho63UvuQ9
+        # (Tier-7 follow-up).
+        _git(workspace_root, "apply", "-p0", "--whitespace=nowarn", "-", stdin=blob)
     except subprocess.CalledProcessError:
         # Likely already applied — `Coder._sync_from_session` runs the same
         # apply inside the implement loop, then `push_implementation` here
         # re-fetches `get_diff` and tries again. Confirm via reverse-check;
         # if the patch IS already in the tree, the diff is a no-op here.
         # Otherwise the patch is genuinely bad and we re-raise.
-        _git(workspace_root, "apply", "--reverse", "--check", "-", stdin=blob)
+        _git(workspace_root, "apply", "-p0", "--reverse", "--check", "-", stdin=blob)
     return applied
 
 

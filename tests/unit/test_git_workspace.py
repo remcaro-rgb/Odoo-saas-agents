@@ -97,13 +97,18 @@ def _seed(repo):
 
 
 def _patch_for_added(repo, rel, content):
-    """Capture a real git diff for adding `rel`, then leave the repo clean."""
+    """Capture a no-prefix unified diff for adding `rel` (matches OpenCode's
+    shadow-git output — see `tests/unit/test_pushback.py::_generate_patch`),
+    then leave the repo clean."""
     target = repo / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
     subprocess.run(["git", "-C", str(repo), "add", rel], check=True)
     patch = subprocess.run(
-        ["git", "-C", str(repo), "diff", "--cached"],
+        # `--no-prefix` keeps the patch headers as `--- <path>` / `+++ <path>`
+        # so `apply_session_diff`'s `git apply -p0` finds them. Production
+        # patches from `GET /session/:id/diff` never carry `a/`/`b/` prefixes.
+        ["git", "-C", str(repo), "diff", "--no-prefix", "--cached"],
         check=True, capture_output=True, text=True,
     ).stdout
     subprocess.run(["git", "-C", str(repo), "reset", "-q", "HEAD", rel], check=True)

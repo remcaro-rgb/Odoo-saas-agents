@@ -39,27 +39,56 @@ def _init_repo(path: Path) -> None:
 
 
 def _generate_patch(path: Path, rel: str, after: str) -> str:
-    """Produce a real git-style unified diff for adding-or-modifying `rel` to
-    `after`, then leave the repo clean so the diff can be re-applied."""
+    """Produce a unified diff in OpenCode's shadow-git format (no ``a/``/``b/``
+    prefixes — paths are absolute from the repo root) for adding-or-modifying
+    ``rel`` to ``after``, then leave the repo clean so the diff can be
+    re-applied.
+
+    Production patches come from ``GET /session/:id/diff`` (OpenCode's
+    shadow-git snapshot) and never carry the ``a/``/``b/`` prefixes that
+    plain ``git diff`` emits, so the apply path must use ``-p0`` (Tier 7
+    follow-up; verified live against ses_1a8f4c29effeUMS10Ho63UvuQ9).
+    """
     target = path / rel
     before = target.read_text() if target.exists() else None
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(after)
+    # `--no-prefix` strips the `a/` / `b/` headers so the patch matches the
+    # OpenCode shadow-git output. `--src-prefix=` / `--dst-prefix=` is a more
+    # portable alternative on older git, but --no-prefix has been in git
+    # since 1.6.6.
+    diff_args = ["diff", "--no-prefix"]
     if before is None:
         subprocess.run(["git", "-C", str(path), "add", rel], check=True)
         diff = subprocess.run(
-            ["git", "-C", str(path), "diff", "--cached"],
+            ["git", "-C", str(path), *diff_args, "--cached"],
             check=True, capture_output=True, text=True,
         ).stdout
         subprocess.run(["git", "-C", str(path), "reset", "-q", "HEAD", rel], check=True)
         target.unlink()
     else:
         diff = subprocess.run(
-            ["git", "-C", str(path), "diff", "HEAD"],
+            ["git", "-C", str(path), *diff_args, "HEAD"],
             check=True, capture_output=True, text=True,
         ).stdout
         target.write_text(before)
     return diff
+
+
+# An SVN-style unified diff matching the verbatim format that OpenCode's
+# shadow-git emits for a one-line addition (locked-in from probe session
+# ses_1a8f4c29effeUMS10Ho63UvuQ9, Tier-7 validation). Headers use
+# ``Index:`` / ``===`` (which ``git apply`` tolerates as context noise) and
+# the ``--- file`` / ``+++ file`` paths carry no ``a/``/``b/`` prefix — so
+# only ``git apply -p0`` finds the target file.
+_OPENCODE_STYLE_PATCH_FOR_NEW_FILE = (
+    "Index: greet.txt\n"
+    "===================================================================\n"
+    "--- greet.txt\t\n"
+    "+++ greet.txt\t\n"
+    "@@ -0,0 +1,1 @@\n"
+    "+hello\n"
+)
 
 
 class _FakeOpenCode:
@@ -86,6 +115,32 @@ def _events(log: EventLog) -> list[str]:
 def test_apply_session_diff_with_an_empty_list_returns_zero(tmp_path):
     _init_repo(tmp_path)
     assert apply_session_diff(str(tmp_path), []) == 0
+
+
+def test_apply_session_diff_handles_opencode_svn_style_patches_without_a_b_prefixes(
+    tmp_path,
+):
+    """OpenCode's shadow-git emits unified diffs whose ``--- file`` / ``+++ file``
+    headers carry NO ``a/`` / ``b/`` prefix (and an SVN-style ``Index:`` /
+    ``===`` preamble that ``git apply`` tolerates as context). ``git apply``'s
+    default ``-p1`` strips the first path segment, so a path like
+    ``custom-addons/x/__manifest__.py`` becomes ``x/__manifest__.py`` and the
+    apply fails with ``No such file or directory``. ``apply_session_diff`` must
+    use ``-p0`` so the path lands exactly as written.
+
+    Regression — Tier-7 PR #36 (GoliattCo/odoo-custom run 26345708762)
+    crashed at ``pushback._git("apply", ...)`` until this was fixed. Patch
+    fixture is the exact format pulled from probe session
+    ``ses_1a8f4c29effeUMS10Ho63UvuQ9``.
+    """
+    _init_repo(tmp_path)
+    applied = apply_session_diff(
+        str(tmp_path),
+        [{"file": "greet.txt", "patch": _OPENCODE_STYLE_PATCH_FOR_NEW_FILE,
+          "status": "added"}],
+    )
+    assert applied == 1
+    assert (tmp_path / "greet.txt").read_text() == "hello\n"
 
 
 def test_apply_session_diff_skips_entries_without_a_patch_string(tmp_path):
