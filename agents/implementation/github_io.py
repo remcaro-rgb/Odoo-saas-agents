@@ -14,6 +14,7 @@ flow for an intent-confirmed PR), and writes the outcome back to the PR.
 from __future__ import annotations
 
 import subprocess
+import sys
 from typing import Any, Protocol, runtime_checkable
 
 from .commenter import escalation_notice, human_commit_ping, implementation_ready
@@ -114,7 +115,19 @@ class GhCliClient:
         self._gh("pr", "comment", str(pr), "--body", body)
 
     def add_label(self, pr: int, label: str) -> None:
-        self._gh("pr", "edit", str(pr), "--add-label", label)
+        # A missing label or transient `gh` failure must not crash the run —
+        # the escalation *comment* is the primary signal; the label is a
+        # secondary index. Log and continue so the run still exits 0 with the
+        # comment in place.
+        try:
+            self._gh("pr", "edit", str(pr), "--add-label", label)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else "no detail"
+            sys.stderr.write(
+                f"warning: gh pr edit --add-label {label} failed "
+                f"(exit {exc.returncode}): {tail}\n"
+            )
 
     def pr_head_branch(self, pr: int) -> str:
         return self._gh(
@@ -216,8 +229,9 @@ def _escalation_detail(result: FlowResult) -> str:
     """A human-readable reason for an escalated implement flow.
 
     A planning-stage escalation carries `/analyze` findings as strings; a
-    coder-stage escalation carries Odoo-rule `Finding`s on the implement result
-    — surface whichever the flow actually produced rather than a generic line.
+    coder-stage escalation carries Odoo-rule `Finding`s; a Gate-1 escalation
+    carries the failed checks' captured output on `implement.gate`. Surface
+    whichever the flow actually produced rather than a generic line.
     """
     if result.stage == "planning" and result.planning.findings:
         return "; ".join(result.planning.findings)
@@ -225,6 +239,12 @@ def _escalation_detail(result: FlowResult) -> str:
         errors = [f for f in result.implement.findings if f.severity == "error"]
         if errors:
             return "; ".join(f"[{f.rule}] {f.message}" for f in errors)
+        gate = result.implement.gate
+        if gate is not None and not gate.passed:
+            failed = ", ".join(check.name for check in gate.failures)
+            # Cap the log tail — escalation comments shouldn't be page-long.
+            logs = gate.logs[-2000:] if len(gate.logs) > 2000 else gate.logs
+            return f"Gate 1 failed: {failed}\n\n{logs}".rstrip()
     return "the implementation could not be completed automatically"
 
 

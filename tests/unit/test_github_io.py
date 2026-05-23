@@ -164,6 +164,31 @@ def test_handle_webhook_intent_confirmed_escalates_when_implement_escalates(
     assert (17, "needs-human") in github.labels
 
 
+def test_escalation_detail_surfaces_gate1_failures(fake_client):
+    """When the coder loop escalates because Gate 1 failed (no Odoo-rule
+    errors), the escalation comment names the failing check(s) and tails the
+    log — not the generic 'could not be completed' fallback."""
+    from agents.implementation.coder import ImplementResult
+    from agents.implementation.core import FlowResult, PlanningResult
+    from agents.implementation.gate1 import CheckResult, Gate1Result
+    from agents.implementation.github_io import _escalation_detail
+
+    gate = Gate1Result(
+        checks=(
+            CheckResult("lint", passed=False, output="club_news/x.py: E501 line too long"),
+        )
+    )
+    impl = ImplementResult(status="escalated", attempts=3, findings=[], gate=gate)
+    planning = PlanningResult(status="ready_to_implement", feature="club-news")
+    result = FlowResult(
+        status="escalated", stage="implement", planning=planning, implement=impl
+    )
+    detail = _escalation_detail(result)
+    assert "Gate 1 failed: lint" in detail
+    assert "E501" in detail
+    assert "could not be completed automatically" not in detail
+
+
 def test_handle_webhook_intent_confirmed_escalation_reports_the_odoo_findings(
     fake_client,
 ):
