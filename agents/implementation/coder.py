@@ -24,6 +24,13 @@ from .speckit_driver import SpecKitDriver
 from .workspace import Workspace
 
 DEFAULT_FRONTIER_MODEL = "anthropic/claude-sonnet-4-6"
+# The path the OpenCode container's process treats as its worktree. Hardcoded
+# in `opencode/Dockerfile` + `provision_workspace.sh`; the headless server's
+# CWD is set to this, so sessions created without an explicit `directory` query
+# param default here. `Coder.implement` posts to `/project/git/init?directory=`
+# with this value to arm OpenCode's shadow-git snapshot tracker before the
+# first LLM step.
+DEFAULT_CONTAINER_WORKSPACE = "/workspace"
 
 # `\b` keeps a field like `display_name = 'X'` from being misread as a model.
 _MODEL_NAME = re.compile(r"""\b_name\s*=\s*['"]([^'"]+)['"]""")
@@ -151,12 +158,14 @@ class Coder:
         frontier_model: str = DEFAULT_FRONTIER_MODEL,
         max_retries: int = 3,
         gate1: Gate1 | None = None,
+        container_workspace: str = DEFAULT_CONTAINER_WORKSPACE,
     ) -> None:
         self.driver = driver
         self.workspace = workspace
         self.frontier_model = frontier_model
         self.max_retries = max_retries
         self.gate1 = gate1
+        self.container_workspace = container_workspace
 
     def _addon_files(self, addon_prefix: str) -> dict[str, str]:
         return {
@@ -198,6 +207,18 @@ class Coder:
         plan.md / tasks.md). The design-spec path leaves it empty: /implement
         reads plan.md / tasks.md instead.
         """
+        # Arm OpenCode's shadow-git snapshot tracker for this worktree. Without
+        # this call, the project that owns the container's `/workspace` has
+        # `vcs: null`; `snapshot.track()` short-circuits on `state.vcs !== "git"`
+        # at every LLM step boundary, and `get_diff` returns `[]` even when the
+        # agent has used the write tool on disk — so `_sync_from_session` below
+        # silently no-ops and `validate_odoo` sees the unmodified tree (the
+        # Tier-4 + Tier-5 + Tier-6 productivity gap). Idempotent: after the
+        # project exists with `vcs: "git"`, repeat calls just return the
+        # existing record. Verified live 2026-05-23 against
+        # https://odoo-saas-opencode.fly.dev (probe ses_1a924cecbffeHEsTSxVGQZkGzh).
+        self.driver.client.init_git_project(self.container_workspace)
+
         # Brand-new addon -> lay down correct-by-construction boilerplate first.
         if not self.workspace.list_files(addon_prefix):
             addon_name = addon_prefix.rstrip("/").rsplit("/", 1)[-1]

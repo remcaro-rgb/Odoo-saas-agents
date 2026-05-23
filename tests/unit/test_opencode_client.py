@@ -74,3 +74,23 @@ def test_send_message_still_sends_model_as_an_object(monkeypatch):
         "providerID": "anthropic",
         "modelID": "claude-sonnet-4-6",
     }
+
+
+def test_init_git_project_posts_to_project_git_init_with_directory(monkeypatch):
+    """`POST /project/git/init?directory=<dir>` lights up OpenCode's shadow-git
+    snapshot tracker — without it, `state.vcs` is `null` for the project that
+    owns `/workspace`, the snapshot tracker short-circuits, and
+    `GET /session/:id/diff` returns an empty list even when the agent has
+    confirmedly edited files (verified live against the headless container on
+    2026-05-23: probe session ses_1a924cecbffeJLEbtR5wrU5Qh7). The call is
+    idempotent — a second invocation returns the same project record."""
+    from agents.implementation.opencode_client import OpenCodeClient
+    client = OpenCodeClient(base_url="http://example")
+    captured = _capture_request(monkeypatch, client)
+    try:
+        client.init_git_project("/workspace")
+    finally:
+        client.close()
+    assert captured[0]["method"] == "POST"
+    assert captured[0]["path"] == "/project/git/init"
+    assert captured[0]["params"] == {"directory": "/workspace"}

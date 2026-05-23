@@ -122,6 +122,28 @@ class OpenCodeClient:
         except httpx.HTTPError:
             return False
 
+    # -- projects ----------------------------------------------------------
+    def init_git_project(self, directory: str) -> dict[str, Any]:
+        """POST /project/git/init?directory=<dir> — bootstrap OpenCode's
+        shadow-git snapshot tracker for the worktree at ``directory``.
+
+        Without this call, the project that owns ``/workspace`` has
+        ``vcs: null``; the snapshot tracker short-circuits at
+        ``state.vcs !== "git"`` and ``GET /session/:id/diff`` returns ``[]``
+        for every message in every session, even when the agent has
+        confirmedly edited files on disk. After the call, ``vcs: "git"``,
+        snapshots fire at each LLM step boundary, and ``get_diff`` returns
+        proper ``FileDiff[]`` entries.
+
+        Idempotent: a second invocation on the same worktree returns the
+        existing project record without re-initializing. Safe to call on
+        every flow entry — verified live against the headless container on
+        2026-05-23 (probe session ses_1a924cecbffeJLEbtR5wrU5Qh7).
+        """
+        return self._request(
+            "POST", "/project/git/init", params={"directory": directory}
+        ) or {}
+
     # -- sessions ----------------------------------------------------------
     def create_session(
         self, *, title: str | None = None, parent_id: str | None = None

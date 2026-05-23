@@ -142,6 +142,27 @@ def test_implement_primes_the_session_with_odoo_context(fake_client):
     assert "widget.counter" in text
 
 
+def test_implement_initializes_git_project_before_first_llm_call(fake_client):
+    """OpenCode's shadow-git snapshot tracker is gated on `state.vcs === "git"`;
+    until `POST /project/git/init?directory=/workspace` runs, snapshots
+    short-circuit and `GET /session/:id/diff` returns `[]` for every message —
+    even ones that the agent confirmedly used the write tool on (verified live
+    2026-05-23: probe session ses_1a924cecbffeJLEbtR5wrU5Qh7). `implement()`
+    MUST call `init_git_project` before its first LLM interaction so the very
+    first step's edits are tracked. Idempotent — fine to call every flow."""
+    ws = InMemoryWorkspace(_clean_addon())
+    Coder(SpecKitDriver(fake_client), ws).implement(
+        "sess-1", "custom-addons/widget/"
+    )
+    assert fake_client.git_init_calls == ["/workspace"]
+    # Order matters: init MUST precede the first LLM call (send_message). If
+    # init lands after, the first step's snapshot baseline is empty and that
+    # step's edits don't appear in get_diff.
+    init_idx = fake_client.call_log.index("init_git_project")
+    send_idx = fake_client.call_log.index("send_message")
+    assert init_idx < send_idx
+
+
 def test_implement_scaffolds_boilerplate_for_a_brand_new_addon(fake_client):
     """A brand-new (empty) addon prefix gets correct-by-construction boilerplate."""
     ws = InMemoryWorkspace()

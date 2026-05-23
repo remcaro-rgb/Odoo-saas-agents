@@ -196,28 +196,29 @@ the Action log: the structured records show what *would* have been posted.
   Until that runner exists, keep `GATE1_CHECK_SET=lint`.
 - **Notifier is unwired.** Slack escalation routes (`notifier.py`) are built but
   need a webhook secret (Tier 2). Escalations still post a GitHub comment + label.
-- **implement → PR-branch push.** *Wired* on two paths, both shadow-aware:
+- **implement → PR-branch push.** *Wired* on the Action path only, shadow-aware:
   - **Action path** (`pushback.py`) — after an `implemented` / `iterated`
     outcome, the Action fetches OpenCode's session diff, applies it to the
     data-plane checkout, commits as `implementation-bot[bot]`, and pushes to
     the PR head branch using the App's installation token. SHADOW logs
     `push.shadowed` and skips. Requires App **Contents: Read & write** (§5
     step 2) before any ACT.
-  - **Container path** (`provisioning.py`) — the OpenCode container's own
-    git can commit + push autonomously during `/implement` using the Fly
-    `GITHUB_TOKEN` secret. In SHADOW, `provision_workspace(shadow=True)`
-    rewrites `origin` to a token-less URL after the initial fetch, so any
-    subsequent autonomous `git push` from the container fails 401 — closing
-    the gap the FIXTURES-stage ACT smoke surfaced. Pass-through:
-    `build_orchestrator(..., decision=decision)` → `Orchestrator(shadow=…)`
-    → `_provision(shadow=…)` → `_provision_script(shadow=…)`.
+  - **Container path** *— removed Tier 7 (2026-05-23).* The Tier-6 workaround
+    that had `/speckit.fix` end with a `git commit && git push origin HEAD`
+    from inside the container was the bypass for an empty `get_diff` (see
+    §7 below). With Tier 7's `init_git_project` fix the Action path is sound
+    again, so `speckit.fix.md` was reverted to "edit files only — do not
+    commit or push". Two pushes would collide with a non-fast-forward error.
+    Token-stripping in `provisioning.py(_provision_script(shadow=…))` is
+    kept as defence-in-depth — any future container-side `git push` still
+    fails 401 in SHADOW.
 - **Cost cap not enforced at the entry point.** `cost.py` (`Budget`,
   `session_cost`) is built; wiring a durable per-PR spend cap into `run()` needs
   cross-run state (Tier 2/3).
 
-- **Action ⇄ container workspace sync.** *Closed* (Tier 4). After every
-  `/speckit.implement`, `Coder._sync_from_session` calls
-  `self.driver.client.get_diff(session_id)` and applies the result to
+- **Action ⇄ container workspace sync.** *Closed* (Tier 4, fully effective
+  with Tier 7). After every `/speckit.implement`, `Coder._sync_from_session`
+  calls `self.driver.client.get_diff(session_id)` and applies the result to
   `self.workspace.apply_session_diff(…)`. The Action's view of the addon now
   matches what OpenCode wrote, so `validate_odoo` and Gate-1 see the real
   state instead of the stale Action-side checkout. Both workspace impls have
@@ -226,3 +227,14 @@ the Action log: the structured records show what *would* have been posted.
   entry's `content` field for unit tests. Both filter out guardrail paths
   (`is_protected_path` in `provisioning.py`) as defence in depth on top of
   the container's sparse-checkout.
+
+- **OpenCode shadow-git snapshots — armed.** *Closed* (Tier 7, 2026-05-23).
+  `Coder.implement` calls `OpenCodeClient.init_git_project("/workspace")`
+  before its first LLM interaction. Without this, the OpenCode project that
+  owns `/workspace` has `vcs: null`; `snapshot.track()` short-circuits on
+  `state.vcs !== "git"` at every LLM step boundary; `get_diff` returns `[]`
+  even when the agent has confirmedly edited files on disk; and the Tier-4
+  sync silently no-ops. The init call is idempotent — once the project is
+  registered with `vcs: "git"`, repeat calls return the existing record.
+  Verified live 2026-05-23 against `https://odoo-saas-opencode.fly.dev`
+  (probe session `ses_1a924cecbffeHEsTSxVGQZkGzh`).

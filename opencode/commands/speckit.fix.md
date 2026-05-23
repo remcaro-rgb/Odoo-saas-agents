@@ -50,24 +50,15 @@ apply it, and the regression test that should catch it.
 - **Do not** touch `infra/`, `.github/workflows/`, the project `Dockerfile`,
   or `saas_tenant_gate/security/` — the project's guardrails (also enforced
   by the permission deny-list and the agent-guardrails CI check).
-- **Ship your work yourself.** After editing, end your run with this exact
-  bash block — the container's `origin` is already authenticated to push
-  the PR head branch:
-
-  ```bash
-  cd /workspace \
-    && git config user.email "impl-agent@goliatt.co" \
-    && git config user.name "Implementation Agent" \
-    && git add -A \
-    && git diff --cached --quiet && echo "no changes" && exit 0 || true \
-    && git commit -m "[impl-agent] <short summary matching the fix>" \
-    && git push origin HEAD
-  ```
-
-  Adapt the commit message to the change (e.g.
-  `[impl-agent] add maintainers field to club_faq manifest`). Do **not** open
-  a new branch or push anywhere else — push only to the branch you are
-  already on (the PR's head branch).
+- **Do not commit, push, or run any git write commands.** Just edit the
+  files with the `edit` / `write` tools and stop. The Action runner picks
+  up your edits via `GET /session/:id/diff` (the OpenCode shadow-git
+  snapshot — armed automatically by `Coder.implement` calling
+  `POST /project/git/init?directory=/workspace` before the first LLM step,
+  fixed 2026-05-23), applies them to its own checkout, and commits + pushes
+  as `implementation-bot[bot]` (the GitHub App identity). If you run
+  `git commit` / `git push` yourself you will collide with that push and
+  the Action workflow will fail with a non-fast-forward error.
 
 ## Output
 
