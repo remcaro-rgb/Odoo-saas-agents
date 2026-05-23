@@ -81,6 +81,19 @@ def test_agent_config_slack_webhook_url_defaults_to_none():
     assert AgentConfig.from_env({}).slack_webhook_url is None
 
 
+def test_agent_config_reads_bot_token_and_app_id_for_pushback():
+    """The push step needs the App's installation token (`GH_TOKEN` in the
+    workflow env) + the App id (for the canonical bot noreply email)."""
+    config = AgentConfig.from_env(
+        {"GH_TOKEN": "ghs_inst_token", "IMPLEMENTATION_BOT_APP_ID": "3818388"}
+    )
+    assert config.bot_token == "ghs_inst_token"
+    assert config.app_id == "3818388"
+    bare = AgentConfig.from_env({})
+    assert bare.bot_token is None
+    assert bare.app_id is None
+
+
 # -- load_event ----------------------------------------------------------------
 def test_load_event_reads_the_name_and_payload(tmp_path):
     env = _event_env(tmp_path, "push", {"ref": "refs/heads/agent/spec-1"})

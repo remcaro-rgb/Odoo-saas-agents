@@ -113,9 +113,10 @@ must never do on your behalf** — this checklist is yours to complete.
    triggers, not App webhooks). **Where can this GitHub App be installed?** →
    **Only on this account.**
 2. **Set repository permissions:** Metadata: Read · Pull requests: Read & write
-   · Issues: Read & write · Contents: Read (bump to Read & write once the
-   implement→push-back is wired — §7). No organization permissions, no event
-   subscriptions.
+   · Issues: Read & write · Contents: **Read & write** (the implement→push-back
+   pushes commits as the App; the App without Contents: Read & write cannot
+   push and ACT-mode runs will fail at the push step). No organization
+   permissions, no event subscriptions.
 3. **Generate a private key.** App settings page → **Generate a private key** →
    save the downloaded `.pem` file (shown only once).
 4. **Note the App ID** at the top of the settings page (a number, e.g.
@@ -186,13 +187,14 @@ the Action log: the structured records show what *would* have been posted.
   only — no build/test gate.
 - **Notifier is unwired.** Slack escalation routes (`notifier.py`) are built but
   need a webhook secret (Tier 2). Escalations still post a GitHub comment + label.
-- **implement → PR-branch push.** The coder drives OpenCode to write addon files
-  in OpenCode's workspace; the path that pushes that result back onto the PR
-  branch as a bot commit is not yet wired. **When it is wired it must be made
-  shadow-aware** — consult the rollout decision before pushing, because
-  `ShadowGitHubClient` only suppresses GitHub *API* writes (comments / labels),
-  not a `git push`. Until then, the `commenter.py` replies that say "pushed the
-  code" run ahead of reality. Verify before the `default_on` stage.
+- **implement → PR-branch push.** *Wired* (`pushback.py`). After an
+  `implemented` / `iterated` outcome, the Action fetches OpenCode's session
+  diff, applies it to the data-plane checkout with `git apply`, commits as
+  `implementation-bot[bot]`, and pushes to the PR head branch using the App's
+  installation token. **Shadow-aware:** in SHADOW the function records what it
+  *would* have pushed (in the `push.shadowed` event record) and skips the
+  apply + commit + push. Requires the App's Contents permission to be
+  **Read & write** (§5 step 2) before any ACT-stage run.
 - **Cost cap not enforced at the entry point.** `cost.py` (`Budget`,
   `session_cost`) is built; wiring a durable per-PR spend cap into `run()` needs
   cross-run state (Tier 2/3).

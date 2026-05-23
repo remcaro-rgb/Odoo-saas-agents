@@ -26,13 +26,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .core import FlowResult, IterationResult, Orchestrator
+from .core import FlowResult, IterationResult, Orchestrator, feature_name
 from .gate1 import Gate1, SubprocessCheckRunner
 from .git_workspace import GitWorkspace
 from .github_io import GhCliClient, GitHubClient, ShadowGitHubClient, handle_webhook
 from .notifier import FakeNotifier, Notifier, SlackNotifier, notify_escalation
 from .observability import EventLog
 from .opencode_client import DEFAULT_BASE_URL, OpenCodeClient
+from .pushback import push_implementation
 from .rollout import Rollout, RolloutDecision
 from .speckit_driver import SpecKitDriver
 
@@ -47,6 +48,14 @@ class AgentConfig:
     workspace_root: str
     gate1_enabled: bool
     slack_webhook_url: str | None
+    # `GH_TOKEN` is the implementation-bot App's installation token, minted in
+    # the workflow by actions/create-github-app-token@v1. It pushes the
+    # implementation back to the PR head branch; the App's GH-side identity
+    # comes through automatically (commits show as `implementation-bot[bot]`).
+    bot_token: str | None
+    # The App's numeric id, used to construct the canonical noreply email
+    # `<id>+implementation-bot[bot]@users.noreply.github.com`.
+    app_id: str | None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AgentConfig:
@@ -57,6 +66,8 @@ class AgentConfig:
         environment exists (a Tier-2 seam); until then the coder runs the
         deterministic Odoo-rule checks only. `SLACK_WEBHOOK_URL` enables Slack
         notifications on escalation; unset = no Slack (a `FakeNotifier`).
+        `GH_TOKEN` + `IMPLEMENTATION_BOT_APP_ID` drive the implement→PR-branch
+        push; unset = no push (the agent runs but its work stays local).
         """
         return cls(
             opencode_base_url=env.get("OPENCODE_BASE_URL") or DEFAULT_BASE_URL,
@@ -65,6 +76,8 @@ class AgentConfig:
             workspace_root=env.get("WORKSPACE_ROOT") or ".",
             gate1_enabled=env.get("GATE1_ENABLED", "false").strip().lower() == "true",
             slack_webhook_url=env.get("SLACK_WEBHOOK_URL") or None,
+            bot_token=env.get("GH_TOKEN") or None,
+            app_id=env.get("IMPLEMENTATION_BOT_APP_ID") or None,
         )
 
 
@@ -236,6 +249,11 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         orchestrator = build_orchestrator(config, client)
         github = build_github(config.data_plane_repo, decision)
         result = handle_webhook(event_name, payload, orchestrator, github)
+        # Push the implementation back to the PR head branch (Tier 2). The
+        # `pushback.push_implementation` call is shadow-aware — in SHADOW it
+        # records the would-push and returns. The push needs the App token +
+        # repo + a result that carries the session id and branch.
+        _maybe_push(config, client, decision, result, log)
     except Exception as exc:
         traceback.print_exc()
         log.emit("error", detail=f"{type(exc).__name__}: {exc}")
@@ -254,6 +272,45 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         pr=_extract_pr(event_name, payload),
     )
     return 0
+
+
+def _maybe_push(
+    config: AgentConfig,
+    client: OpenCodeClient,
+    decision: RolloutDecision,
+    result: FlowResult | IterationResult | None,
+    log: EventLog,
+) -> None:
+    """Drive `pushback.push_implementation` when the outcome produced code.
+
+    A no-op unless the agent has a token + repo + a session-bearing
+    successful result. The pushback module is itself shadow-aware.
+    """
+    if not (config.bot_token and config.data_plane_repo):
+        return
+    if result is None:
+        return
+    if getattr(result, "status", "") not in ("implemented", "iterated"):
+        return
+    session_id = getattr(result, "session_id", None)
+    branch = getattr(result, "branch", None)
+    if not (session_id and branch):
+        return
+    push_url = (
+        f"https://x-access-token:{config.bot_token}"
+        f"@github.com/{config.data_plane_repo}.git"
+    )
+    push_implementation(
+        workspace_root=config.workspace_root,
+        oc_client=client,
+        session_id=session_id,
+        branch=branch,
+        push_url=push_url,
+        feature=feature_name(branch),
+        decision=decision,
+        log=log,
+        app_id=config.app_id,
+    )
 
 
 def main() -> int:

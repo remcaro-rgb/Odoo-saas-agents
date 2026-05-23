@@ -19,6 +19,10 @@
 - Runnable layer (Tier 1): `app` — the composition root + GitHub Actions entry
   point (`python -m agents.implementation`) that reads a webhook event, consults
   `rollout`, builds the real object graph, and calls `handle_webhook`.
+
+- Push-back (Tier 2): `pushback` — fetches OpenCode's session diff, applies it
+  to the data-plane checkout, commits as `implementation-bot[bot]`, and pushes
+  to the PR head branch. Shadow-aware (no push in SHADOW).
 """
 
 from .app import AgentConfig, main, run
@@ -39,6 +43,7 @@ from .notifier import FakeNotifier, Notifier, notify_alert, notify_escalation
 from .observability import EventLog
 from .opencode_client import OpenCodeClient, OpenCodeError, Session
 from .preview import FakeFlyClient, FlyClient, PreviewEnv, PreviewManager
+from .pushback import push_implementation
 from .rollout import Rollout, RolloutDecision, RolloutStage
 from .speckit_driver import SpecKitDriver
 from .workspace import InMemoryWorkspace, Workspace
@@ -81,6 +86,7 @@ __all__ = [
     "main",
     "notify_alert",
     "notify_escalation",
+    "push_implementation",
     "route",
     "run",
     "session_cost",

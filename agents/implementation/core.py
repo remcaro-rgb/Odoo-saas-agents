@@ -51,6 +51,10 @@ class FlowResult:
     stage: str                           # "planning" | "implement"
     planning: PlanningResult
     implement: ImplementResult | None = None
+    # The OpenCode session id + PR branch — surfaced so the composition root
+    # can drive the implement→PR-branch push (`pushback.push_implementation`).
+    session_id: str | None = None
+    branch: str | None = None
 
 
 @dataclass
@@ -61,6 +65,7 @@ class IterationResult:
     status: str               # "iterated" | "acknowledged" | "escalated" | "ignored"
     comment: str = ""         # the GitHub reply to post ("" = post nothing)
     session_id: str | None = None
+    branch: str | None = None  # surfaced for `pushback.push_implementation`
 
 
 def route(event: Event) -> str:
@@ -210,7 +215,10 @@ class Orchestrator:
         """
         planning = self.run_planning(event)
         if planning.status == "escalated":
-            return FlowResult("escalated", "planning", planning)
+            return FlowResult(
+                "escalated", "planning", planning,
+                session_id=planning.session_id, branch=event.branch,
+            )
 
         if addon_prefix is None:
             addon_prefix = addon_prefix_from_spec(
@@ -231,7 +239,10 @@ class Orchestrator:
         )
         self._provision(session_id, event.branch or "")
         impl = coder.implement(session_id, addon_prefix)
-        return FlowResult(impl.status, "implement", planning, impl)
+        return FlowResult(
+            impl.status, "implement", planning, impl,
+            session_id=session_id, branch=event.branch,
+        )
 
     def reporter_iteration(self, event: Event) -> IterationResult:
         """Handle a reporter's PR comment (Phase D).
@@ -281,6 +292,7 @@ class Orchestrator:
                         "Re-implemented with your requested change."
                     ),
                     session_id=record.session_id,
+                    branch=event.branch,
                 )
             return IterationResult(
                 intent,
@@ -291,6 +303,7 @@ class Orchestrator:
                     "validation — flagging for a human.",
                 ),
                 session_id=record.session_id,
+                branch=event.branch,
             )
 
         if intent is CommentIntent.QUESTION:
