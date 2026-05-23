@@ -28,6 +28,7 @@ import subprocess
 from typing import Any, Protocol
 
 from .observability import EventLog
+from .provisioning import is_protected_path
 from .rollout import RolloutDecision
 
 BOT_NAME = "implementation-bot[bot]"
@@ -66,6 +67,12 @@ def apply_session_diff(
     pieces: list[str] = []
     applied = 0
     for entry in diffs:
+        path = str(entry.get("file") or "")
+        # Defence in depth: never apply a diff that targets a guardrail path,
+        # even if OpenCode somehow surfaced one. The container's sparse-checkout
+        # in provisioning.py is the first line of defence.
+        if is_protected_path(path):
+            continue
         patch = str(entry.get("patch", "")).rstrip("\n")
         if not patch.strip():
             continue

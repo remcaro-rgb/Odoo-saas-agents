@@ -214,3 +214,15 @@ the Action log: the structured records show what *would* have been posted.
 - **Cost cap not enforced at the entry point.** `cost.py` (`Budget`,
   `session_cost`) is built; wiring a durable per-PR spend cap into `run()` needs
   cross-run state (Tier 2/3).
+
+- **Action ⇄ container workspace sync.** *Closed* (Tier 4). After every
+  `/speckit.implement`, `Coder._sync_from_session` calls
+  `self.driver.client.get_diff(session_id)` and applies the result to
+  `self.workspace.apply_session_diff(…)`. The Action's view of the addon now
+  matches what OpenCode wrote, so `validate_odoo` and Gate-1 see the real
+  state instead of the stale Action-side checkout. Both workspace impls have
+  it: `GitWorkspace.apply_session_diff` delegates to `pushback.apply_session_diff`
+  (real `git apply`), and `InMemoryWorkspace.apply_session_diff` reads each
+  entry's `content` field for unit tests. Both filter out guardrail paths
+  (`is_protected_path` in `provisioning.py`) as defence in depth on top of
+  the container's sparse-checkout.

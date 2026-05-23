@@ -24,6 +24,17 @@ _TOKEN_ENV = "GITHUB_TOKEN"
 _PROTECTED_PATHS = ("infra/", ".github/", "Dockerfile", "saas_tenant_gate/security/")
 
 
+def is_protected_path(path: str) -> bool:
+    """True when `path` falls under a guardrail directory (`infra/`,
+    `.github/`, `saas_tenant_gate/security/`) or is the `Dockerfile`.
+
+    Public so `pushback.apply_session_diff` and `Workspace.apply_session_diff`
+    can filter session-diff entries before applying them — defence in depth on
+    top of the container's sparse checkout (which is the first line of defence).
+    """
+    return any(path == p.rstrip("/") or path.startswith(p) for p in _PROTECTED_PATHS)
+
+
 def _provision_script(
     repo: str, branch: str, workdir: str, *, shadow: bool = False
 ) -> str:

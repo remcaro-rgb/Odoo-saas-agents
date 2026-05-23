@@ -152,6 +152,56 @@ def test_implement_scaffolds_boilerplate_for_a_brand_new_addon(fake_client):
     assert result.status == "implemented"
 
 
+# -- session-diff sync (Tier-4 Action ⇄ container workspace sync) -------------
+def test_implement_syncs_opencode_session_diff_before_validation(fake_client):
+    """After each `/speckit.implement`, the coder pulls OpenCode's session
+    diff into the local workspace so validate_odoo / Gate-1 sees what the
+    agent actually wrote (runbook §7 Tier-4 fix).
+
+    Without the sync, an addon that's incomplete on the Action-side would
+    stay incomplete from the validator's view (the agent's writes are
+    stranded in the OpenCode container). With the sync, the diff lands in
+    `ws.files` before validation and a clean run completes at attempt 0.
+    """
+    # Start incomplete: manifest is there, but no model and no ACL yet.
+    ws = InMemoryWorkspace(
+        {
+            "custom-addons/widget/__manifest__.py": GOOD_MANIFEST,
+            "custom-addons/widget/__init__.py": "from . import models\n",
+        }
+    )
+    # The "agent" returns a diff that adds the missing files.
+    fake_client.set_diff(
+        [
+            {
+                "file": "custom-addons/widget/models/widget.py",
+                "status": "added",
+                "content": (
+                    "class Widget(models.Model):\n"
+                    "    _name = 'widget.counter'\n"
+                ),
+            },
+            {
+                "file": "custom-addons/widget/security/ir.model.access.csv",
+                "status": "added",
+                "content": (
+                    ACL_HEADER
+                    + "access_widget,a,model_widget_counter,"
+                    "base.group_user,1,1,1,1\n"
+                ),
+            },
+        ]
+    )
+    result = Coder(SpecKitDriver(fake_client), ws).implement(
+        "ses_x", "custom-addons/widget/"
+    )
+    # The diff was synced into the workspace before validate_odoo ran.
+    assert "custom-addons/widget/models/widget.py" in ws.files
+    assert "custom-addons/widget/security/ir.model.access.csv" in ws.files
+    # And the addon is now clean -> implemented at attempt 0.
+    assert result.status == "implemented"
+
+
 # -- Gate 1 wiring ------------------------------------------------------------
 def test_implement_runs_gate1_after_the_odoo_rules_pass(fake_client):
     """When a Gate1 is configured, it runs once the Odoo rules are clean."""

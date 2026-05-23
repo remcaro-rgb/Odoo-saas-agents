@@ -116,6 +116,27 @@ def test_apply_session_diff_modifies_an_existing_file(tmp_path):
     assert (tmp_path / "initial.txt").read_text() == "initial\nadded line\n"
 
 
+def test_apply_session_diff_filters_protected_paths(tmp_path):
+    """A diff entry targeting a guardrail path is dropped before git apply
+    runs — defense in depth on top of provisioning's sparse-checkout."""
+    _init_repo(tmp_path)
+    # Build a real patch for a protected path so the test is realistic.
+    bad_patch = _generate_patch(
+        tmp_path, ".github/workflows/evil.yml", "name: evil\n"
+    )
+    good_patch = _generate_patch(tmp_path, "ok.txt", "ok\n")
+    n = apply_session_diff(
+        str(tmp_path),
+        [
+            {"file": ".github/workflows/evil.yml", "patch": bad_patch, "status": "added"},
+            {"file": "ok.txt", "patch": good_patch, "status": "added"},
+        ],
+    )
+    assert n == 1                                    # only the safe one
+    assert (tmp_path / "ok.txt").read_text() == "ok\n"
+    assert not (tmp_path / ".github/workflows/evil.yml").exists()
+
+
 # -- commit_and_push -----------------------------------------------------------
 def test_commit_and_push_with_no_staged_changes_returns_none(tmp_path):
     """If nothing changed, do not create an empty commit and do not push."""

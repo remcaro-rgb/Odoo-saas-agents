@@ -164,6 +164,18 @@ class Coder:
             for path in self.workspace.list_files(addon_prefix)
         }
 
+    def _sync_from_session(self, session_id: str) -> int:
+        """Pull OpenCode's session diff into `self.workspace` so the next
+        `validate_odoo` / Gate-1 reads what the agent *actually* wrote.
+
+        Without this, the agent's writes live only in the OpenCode container's
+        workspace; the Action-side validation sees the unchanged tree and the
+        loop short-circuits to "implemented" before any real work happens
+        (runbook §7, Tier-4 sync fix).
+        """
+        diffs = self.driver.client.get_diff(session_id) or []
+        return self.workspace.apply_session_diff(diffs)
+
     def implement(self, session_id: str, addon_prefix: str) -> ImplementResult:
         """Scaffold (if new) -> prime -> implement -> validate -> Gate 1.
 
@@ -188,6 +200,8 @@ class Coder:
 
         # Initial implementation pass — routine work on the default (OpenCode Go) model.
         self.driver.run_implement(session_id)
+        # Sync OpenCode's writes into self.workspace BEFORE validation sees them.
+        self._sync_from_session(session_id)
 
         for attempt in range(self.max_retries + 1):
             findings = validate_odoo(self._addon_files(addon_prefix))
@@ -213,4 +227,6 @@ class Coder:
             self.driver.run_implement(
                 session_id, correction, model=self.frontier_model
             )
+            # Sync the corrective writes before the next attempt's validation.
+            self._sync_from_session(session_id)
         raise AssertionError("unreachable")  # pragma: no cover

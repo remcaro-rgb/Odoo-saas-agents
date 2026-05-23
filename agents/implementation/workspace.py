@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+from .provisioning import is_protected_path
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class Workspace(Protocol):
     def list_files(self, prefix: str = "") -> list[str]: ...
     def commit(self, paths: Iterable[str], message: str) -> str: ...
     def escalate(self, reason: str, details: str = "") -> None: ...
+    def apply_session_diff(self, diffs: list[dict[str, Any]]) -> int: ...
 
 
 class InMemoryWorkspace:
@@ -72,3 +75,31 @@ class InMemoryWorkspace:
 
     def escalate(self, reason: str, details: str = "") -> None:
         self.escalations.append(Escalation(reason, details))
+
+    def apply_session_diff(self, diffs: list[dict[str, Any]]) -> int:
+        """Pull OpenCode's session-diff payload into the in-memory store.
+
+        Production runs use `GitWorkspace.apply_session_diff` (which delegates
+        to `pushback.apply_session_diff` and applies real unified-diff patches
+        via `git apply`). The in-memory variant is test-only and reads the
+        optional `content` field on each entry — the rich `patch` payload is
+        ignored (parsing unified diffs in pure Python isn't worth it for a
+        fake). Guardrail paths are filtered the same way as the GitWorkspace
+        path, so behaviour is symmetric for unit tests of that defence.
+        """
+        applied = 0
+        for entry in diffs:
+            path = str(entry.get("file") or "")
+            if not path or is_protected_path(path):
+                continue
+            status = str(entry.get("status") or "modified")
+            if status == "deleted":
+                if path in self.files:
+                    del self.files[path]
+                    applied += 1
+            elif "content" in entry:
+                self.files[path] = str(entry["content"])
+                applied += 1
+            # Patch-only entries (no `content`) are not applied in-memory —
+            # tests that need that path use `GitWorkspace` instead.
+        return applied

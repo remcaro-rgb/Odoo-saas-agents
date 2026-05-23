@@ -86,3 +86,53 @@ def test_escalate_is_recorded(repo):
     ws.escalate("spec-refinement-needed", "analyze found a contradiction")
     assert ws.escalations[-1].reason == "spec-refinement-needed"
     assert "contradiction" in ws.escalations[-1].details
+
+
+# -- apply_session_diff (Tier-4 sync, GitWorkspace half) ----------------------
+def _seed(repo):
+    """A repo with one initial commit so subsequent patches have a parent ref."""
+    (repo / "initial.txt").write_text("seed\n")
+    subprocess.run(["git", "-C", str(repo), "add", "initial.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+
+
+def _patch_for_added(repo, rel, content):
+    """Capture a real git diff for adding `rel`, then leave the repo clean."""
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    subprocess.run(["git", "-C", str(repo), "add", rel], check=True)
+    patch = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--cached"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    subprocess.run(["git", "-C", str(repo), "reset", "-q", "HEAD", rel], check=True)
+    target.unlink()
+    return patch
+
+
+def test_git_workspace_apply_session_diff_applies_a_unified_diff_patch(repo):
+    """GitWorkspace.apply_session_diff delegates to pushback's git-apply
+    plumbing — applies a `SnapshotFileDiff[]` (file + patch + status) to
+    the real worktree."""
+    _seed(repo)
+    ws = GitWorkspace(str(repo))
+    patch = _patch_for_added(repo, "agent_wrote.txt", "hello from the agent\n")
+    n = ws.apply_session_diff(
+        [{"file": "agent_wrote.txt", "status": "added", "patch": patch}]
+    )
+    assert n == 1
+    assert (repo / "agent_wrote.txt").read_text() == "hello from the agent\n"
+
+
+def test_git_workspace_apply_session_diff_drops_protected_paths(repo):
+    """A diff that targets a guardrail path is filtered out before
+    `git apply` ever sees it — defense in depth on the GitWorkspace half."""
+    _seed(repo)
+    ws = GitWorkspace(str(repo))
+    patch = _patch_for_added(repo, ".github/workflows/evil.yml", "name: evil\n")
+    n = ws.apply_session_diff(
+        [{"file": ".github/workflows/evil.yml", "status": "added", "patch": patch}]
+    )
+    assert n == 0
+    assert not (repo / ".github/workflows/evil.yml").exists()

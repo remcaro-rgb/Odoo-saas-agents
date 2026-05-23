@@ -14,7 +14,9 @@ import os
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
+from .pushback import apply_session_diff as _apply_session_diff_to_root
 from .workspace import Escalation
 
 
@@ -69,3 +71,14 @@ class GitWorkspace:
         # TODO(phase-d): also add the `reason` label to the PR via `gh` — needs
         # live GitHub auth, so it is integration-wired in Phase D, not here.
         self.escalations.append(Escalation(reason, details))
+
+    def apply_session_diff(self, diffs: list[dict[str, Any]]) -> int:
+        """Apply OpenCode's session diff to the worktree via `git apply`.
+
+        Delegates to `pushback.apply_session_diff`, which already handles the
+        patch-concatenation, the protected-path defence-in-depth filter, and
+        the actual `git apply` invocation. Returns the number of entries the
+        underlying call actually applied (0 when the diff was empty or every
+        entry was either patch-less or targeted a guardrail path).
+        """
+        return _apply_session_diff_to_root(str(self.root), diffs)
