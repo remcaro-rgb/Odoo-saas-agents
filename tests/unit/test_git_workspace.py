@@ -29,6 +29,42 @@ def test_git_workspace_satisfies_the_protocol(repo):
     assert isinstance(GitWorkspace(str(repo)), Workspace)
 
 
+def test_commit_succeeds_with_no_global_or_local_git_identity(tmp_path, monkeypatch):
+    """Production reproducer — `actions/checkout@v4` clones the data-plane
+    repo into the Action runner's workspace but does NOT set a global git
+    identity. ``GitWorkspace.commit`` is hit by ``Orchestrator.run_planning``
+    when committing ``plan.md`` / ``tasks.md`` for design specs and MUST
+    configure its own local identity, or ``git commit`` returns exit 128
+    ("Please tell me who you are").
+
+    Regression — Tier-7 PR #36 first attempt (run 26345515710) crashed at
+    ``self._git("commit", "-m", message)`` because no identity was set on
+    the runner's clone. Pairs with ``pushback.commit_and_push`` which
+    already configures the bot identity before its commit.
+    """
+    # Fresh repo with NO local identity. Override the GLOBAL/SYSTEM git
+    # config (/dev/null) and HOME so the dev's `~/.gitconfig` doesn't
+    # accidentally satisfy the identity requirement.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "initial.txt").write_text("initial\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "_no_home"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+    ws = GitWorkspace(str(tmp_path))
+    sha = ws.commit(["initial.txt"], "[impl-agent] plan: smoke")
+
+    assert sha and len(sha) == 40, "commit() must return the new HEAD SHA"
+    # The committed author should be the bot — same identity scheme as
+    # `pushback.commit_and_push` so design-spec planning commits look the
+    # same as the implement-side push commits.
+    author = subprocess.run(
+        ["git", "-C", str(tmp_path), "show", "-s", "--format=%an <%ae>", sha],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert "implementation-bot[bot]" in author
+
+
 def test_write_then_read_roundtrips(repo):
     ws = GitWorkspace(str(repo))
     ws.write("models/widget.py", "class Widget: pass")

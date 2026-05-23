@@ -16,8 +16,25 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from .pushback import BOT_NAME
 from .pushback import apply_session_diff as _apply_session_diff_to_root
 from .workspace import Escalation
+
+
+def _bot_identity_email() -> str:
+    """Bot author email, matching ``pushback.commit_and_push`` so design-spec
+    planning commits land with the same identity as implementation pushes.
+
+    Uses ``IMPLEMENTATION_BOT_APP_ID`` env var when set so the email is the
+    GitHub App's noreply form
+    ``<app_id>+implementation-bot[bot]@users.noreply.github.com`` — what
+    GitHub uses to attribute the commit to the App. Falls back to a generic
+    bot email when the env var is missing (local dev / unit tests).
+    """
+    app_id = os.environ.get("IMPLEMENTATION_BOT_APP_ID")
+    if app_id:
+        return f"{app_id}+implementation-bot[bot]@users.noreply.github.com"
+    return "implementation-bot[bot]@users.noreply.github.com"
 
 
 class GitWorkspace:
@@ -63,6 +80,14 @@ class GitWorkspace:
         return sorted(found)
 
     def commit(self, paths: Iterable[str], message: str) -> str:
+        # Configure bot identity on the LOCAL repo before committing.
+        # `actions/checkout@v4` does not set a global git identity on the
+        # runner, so without this `git commit` errors with exit 128
+        # ("Please tell me who you are"). Mirrors
+        # `pushback.commit_and_push`'s identity so design-spec planning
+        # commits and implement-side push commits look the same.
+        self._git("config", "user.email", _bot_identity_email())
+        self._git("config", "user.name", BOT_NAME)
         self._git("add", *paths)
         self._git("commit", "-m", message)
         return self._git("rev-parse", "HEAD").strip()
