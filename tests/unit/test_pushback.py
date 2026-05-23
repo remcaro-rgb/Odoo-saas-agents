@@ -116,6 +116,23 @@ def test_apply_session_diff_modifies_an_existing_file(tmp_path):
     assert (tmp_path / "initial.txt").read_text() == "initial\nadded line\n"
 
 
+def test_apply_session_diff_is_idempotent_when_patch_already_applied(tmp_path):
+    """Coder._sync_from_session applies the diff to the workspace; then
+    pushback.push_implementation fetches the same diff and tries to apply it
+    again. Without idempotency the second `git apply` errors and crashes the
+    run. With it, the reverse-check fallback treats the patch as a no-op."""
+    _init_repo(tmp_path)
+    patch = _generate_patch(tmp_path, "synced.txt", "agent-write\n")
+    diff = [{"file": "synced.txt", "patch": patch, "status": "added"}]
+    # First apply lands the change.
+    assert apply_session_diff(str(tmp_path), diff) == 1
+    assert (tmp_path / "synced.txt").read_text() == "agent-write\n"
+    # Second apply must not error — reverse-check sees the patch is already
+    # in the tree and returns cleanly.
+    assert apply_session_diff(str(tmp_path), diff) == 1
+    assert (tmp_path / "synced.txt").read_text() == "agent-write\n"
+
+
 def test_apply_session_diff_filters_protected_paths(tmp_path):
     """A diff entry targeting a guardrail path is dropped before git apply
     runs — defense in depth on top of provisioning's sparse-checkout."""
