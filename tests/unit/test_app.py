@@ -5,15 +5,24 @@ import json
 from agents.implementation.app import (
     AgentConfig,
     build_github,
+    build_notifier,
     build_orchestrator,
     load_event,
     main,
+    notify_outcome,
     rollout_target,
     run,
 )
-from agents.implementation.core import Orchestrator
+from agents.implementation.classifier import CommentIntent
+from agents.implementation.core import (
+    FlowResult,
+    IterationResult,
+    Orchestrator,
+    PlanningResult,
+)
 from agents.implementation.gate1 import Gate1
 from agents.implementation.github_io import GhCliClient, ShadowGitHubClient
+from agents.implementation.notifier import FakeNotifier, SlackNotifier
 from agents.implementation.observability import EventLog
 from agents.implementation.opencode_client import DEFAULT_BASE_URL
 from agents.implementation.rollout import RolloutDecision
@@ -57,6 +66,7 @@ def test_agent_config_from_env_reads_overrides():
             "DATA_PLANE_REPO": "acme/odoo",
             "WORKSPACE_ROOT": "/checkout",
             "GATE1_ENABLED": "true",
+            "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/X/Y/Z",
         }
     )
     assert config.opencode_base_url == "https://oc.example"
@@ -64,6 +74,11 @@ def test_agent_config_from_env_reads_overrides():
     assert config.data_plane_repo == "acme/odoo"
     assert config.workspace_root == "/checkout"
     assert config.gate1_enabled is True
+    assert config.slack_webhook_url == "https://hooks.slack.com/services/X/Y/Z"
+
+
+def test_agent_config_slack_webhook_url_defaults_to_none():
+    assert AgentConfig.from_env({}).slack_webhook_url is None
 
 
 # -- load_event ----------------------------------------------------------------
@@ -181,6 +196,78 @@ def test_run_aborts_with_exit_one_when_data_plane_repo_is_missing(tmp_path):
     log = _log()
     assert run(env, log=log) == 1
     assert "misconfigured" in _events(log)
+
+
+# -- build_notifier ------------------------------------------------------------
+def test_build_notifier_act_with_url_returns_slack():
+    config = AgentConfig.from_env({"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"})
+    assert isinstance(build_notifier(config, RolloutDecision.ACT), SlackNotifier)
+
+
+def test_build_notifier_act_without_url_returns_fake():
+    """ACT without a webhook still yields a no-op notifier — the agent must
+    not crash because Slack isn't configured."""
+    config = AgentConfig.from_env({})
+    assert isinstance(build_notifier(config, RolloutDecision.ACT), FakeNotifier)
+
+
+def test_build_notifier_shadow_returns_fake_even_with_url():
+    """SHADOW suppresses every world-facing side effect, Slack included —
+    even when a webhook URL is configured."""
+    config = AgentConfig.from_env({"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"})
+    assert isinstance(build_notifier(config, RolloutDecision.SHADOW), FakeNotifier)
+
+
+# -- notify_outcome ------------------------------------------------------------
+def _escalated_flow_result() -> FlowResult:
+    planning = PlanningResult(
+        status="escalated", feature="widget", findings=["CRITICAL: contradiction"]
+    )
+    return FlowResult(status="escalated", stage="planning", planning=planning)
+
+
+def test_notify_outcome_pings_slack_on_an_escalated_flow_result():
+    fake = FakeNotifier()
+    notify_outcome(fake, _escalated_flow_result(), pr=42)
+    assert len(fake.sent) == 1
+    channel, message, severity = fake.sent[0]
+    assert "42" in message
+    assert "planning" in message
+    assert severity == "page"
+
+
+def test_notify_outcome_pings_slack_on_an_escalated_iteration_result():
+    fake = FakeNotifier()
+    result = IterationResult(
+        intent=CommentIntent.CHANGE_REQUEST, status="escalated", comment="…"
+    )
+    notify_outcome(fake, result, pr=17)
+    assert len(fake.sent) == 1
+    message = fake.sent[0][1]
+    assert "17" in message
+    assert "change_request" in message
+
+
+def test_notify_outcome_is_a_noop_for_a_clean_implemented_outcome():
+    fake = FakeNotifier()
+    planning = PlanningResult(status="ready_to_implement", feature="x")
+    clean = FlowResult(status="implemented", stage="implement", planning=planning)
+    notify_outcome(fake, clean, pr=42)
+    assert fake.sent == []
+
+
+def test_notify_outcome_is_a_noop_when_result_is_none():
+    fake = FakeNotifier()
+    notify_outcome(fake, None, pr=42)
+    assert fake.sent == []
+
+
+def test_notify_outcome_is_a_noop_when_pr_is_unknown():
+    """A push-event escalation has no PR number — skip Slack rather than
+    page on-call with an unlinkable alert."""
+    fake = FakeNotifier()
+    notify_outcome(fake, _escalated_flow_result(), pr=None)
+    assert fake.sent == []
 
 
 def test_main_delegates_to_run(monkeypatch):

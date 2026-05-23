@@ -57,5 +57,6 @@ jobs:
           ROLLOUT_FIXTURES: ${{ vars.ROLLOUT_FIXTURES }}
           ROLLOUT_OPT_IN: ${{ vars.ROLLOUT_OPT_IN }}
           GATE1_ENABLED: ${{ vars.GATE1_ENABLED }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GH_TOKEN: ${{ steps.bot_token.outputs.token }}
         run: python -m agents.implementation

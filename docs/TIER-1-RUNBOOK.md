@@ -91,6 +91,7 @@ Set these on the **data-plane repo** (Settings → Secrets and variables → Act
 |---|---|
 | `OPENCODE_SERVER_PASSWORD` | The OpenCode server's HTTP Basic password. |
 | `IMPLEMENTATION_BOT_PRIVATE_KEY` | The `implementation-bot` GitHub App's private key — paste the full `.pem` contents (including the `-----BEGIN/END-----` lines). See §5. |
+| `SLACK_WEBHOOK_URL` *(optional)* | Slack [incoming webhook](https://api.slack.com/messaging/webhooks) URL. When set, the agent pages `#devops-implementations` on escalations. Unset = no Slack (the agent uses a `FakeNotifier`). SHADOW stage always uses the fake even if set. |
 
 The rollout `target` is the PR number (a push uses the branch). The `fixtures` /
 `opt_in` sets match against that id; `shadow` and `default_on` ignore it.

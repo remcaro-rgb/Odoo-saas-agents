@@ -26,10 +26,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .core import Orchestrator
+from .core import FlowResult, IterationResult, Orchestrator
 from .gate1 import Gate1, SubprocessCheckRunner
 from .git_workspace import GitWorkspace
 from .github_io import GhCliClient, GitHubClient, ShadowGitHubClient, handle_webhook
+from .notifier import FakeNotifier, Notifier, SlackNotifier, notify_escalation
 from .observability import EventLog
 from .opencode_client import DEFAULT_BASE_URL, OpenCodeClient
 from .rollout import Rollout, RolloutDecision
@@ -45,6 +46,7 @@ class AgentConfig:
     data_plane_repo: str | None
     workspace_root: str
     gate1_enabled: bool
+    slack_webhook_url: str | None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AgentConfig:
@@ -53,7 +55,8 @@ class AgentConfig:
         `DATA_PLANE_REPO` is the `owner/name` slug of the repo spec PRs open
         against. `GATE1_ENABLED` stays off until the agentlab Odoo build
         environment exists (a Tier-2 seam); until then the coder runs the
-        deterministic Odoo-rule checks only.
+        deterministic Odoo-rule checks only. `SLACK_WEBHOOK_URL` enables Slack
+        notifications on escalation; unset = no Slack (a `FakeNotifier`).
         """
         return cls(
             opencode_base_url=env.get("OPENCODE_BASE_URL") or DEFAULT_BASE_URL,
@@ -61,6 +64,7 @@ class AgentConfig:
             data_plane_repo=env.get("DATA_PLANE_REPO") or None,
             workspace_root=env.get("WORKSPACE_ROOT") or ".",
             gate1_enabled=env.get("GATE1_ENABLED", "false").strip().lower() == "true",
+            slack_webhook_url=env.get("SLACK_WEBHOOK_URL") or None,
         )
 
 
@@ -125,6 +129,55 @@ def build_orchestrator(config: AgentConfig, client: OpenCodeClient) -> Orchestra
         else None
     )
     return Orchestrator(workspace, driver, repo=config.data_plane_repo, gate1=gate1)
+
+
+def build_notifier(config: AgentConfig, decision: RolloutDecision) -> Notifier:
+    """The escalation notifier for a rollout decision.
+
+    ACT with a configured `SLACK_WEBHOOK_URL` -> a real `SlackNotifier`. SHADOW
+    is always a `FakeNotifier` — Slack is a world-facing side effect, so SHADOW
+    suppresses it just like comments / labels. ACT without a URL is also a
+    `FakeNotifier` (the agent must not crash because Slack isn't configured).
+    """
+    if decision is RolloutDecision.SHADOW:
+        return FakeNotifier()
+    if config.slack_webhook_url:
+        return SlackNotifier(config.slack_webhook_url)
+    return FakeNotifier()
+
+
+def notify_outcome(
+    notifier: Notifier,
+    result: FlowResult | IterationResult | None,
+    *,
+    pr: int | None,
+) -> None:
+    """Page on-call when an agent run escalates; no-op for a clean outcome.
+
+    A push-event escalation has no PR number (`pr is None`); skip Slack rather
+    than emit an unlinkable page. Clean (`implemented`, `iterated`,
+    `acknowledged`, `ignored`) outcomes route to the PR comment alone — Slack
+    is reserved for the "needs-human" cases.
+    """
+    if pr is None or result is None or getattr(result, "status", "") != "escalated":
+        return
+    if isinstance(result, FlowResult):
+        reason = f"implement flow escalated at the {result.stage} stage"
+    else:  # IterationResult
+        reason = f"reporter iteration ({result.intent.value}) escalated"
+    notify_escalation(notifier, pr, reason)
+
+
+def _extract_pr(event_name: str, payload: Mapping[str, Any]) -> int | None:
+    """The PR number an event carries (used to route the Slack page); `None`
+    for events that do not target a single PR (e.g. a `push`)."""
+    if event_name == "issue_comment":
+        number = (payload.get("issue") or {}).get("number")
+    elif event_name == "pull_request":
+        number = (payload.get("pull_request") or {}).get("number")
+    else:
+        number = None
+    return int(number) if isinstance(number, int) else None
 
 
 def build_github(repo: str, decision: RolloutDecision) -> GitHubClient:
@@ -194,6 +247,11 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         "outcome",
         status=result.status if result is not None else "none",
         shadow=decision is RolloutDecision.SHADOW,
+    )
+    notify_outcome(
+        build_notifier(config, decision),
+        result,
+        pr=_extract_pr(event_name, payload),
     )
     return 0
 
