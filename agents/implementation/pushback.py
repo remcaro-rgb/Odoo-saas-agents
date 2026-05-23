@@ -46,10 +46,28 @@ def _git(
     workspace_root: str, *args: str, check: bool = True,
     stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    """Run `git -C <workspace_root> <args>`. On failure, raise
+    ``CalledProcessError`` with git's stderr folded into the exception
+    message — the default repr is just `"Command '[...]' returned non-zero
+    exit status N"` which leaves you guessing about which `fatal:` actually
+    fired (especially for credential-masked push URLs)."""
+    proc = subprocess.run(
         ["git", "-C", workspace_root, *args],
-        check=check, capture_output=True, text=True, input=stdin,
+        check=False, capture_output=True, text=True, input=stdin,
     )
+    if check and proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise subprocess.CalledProcessError(
+            proc.returncode,
+            # Surface stderr by jamming it into the command repr; the
+            # CalledProcessError default __str__ prints `Command '<cmd>'
+            # returned non-zero exit status N` and that's the only thing
+            # GitHub Actions logs from a Python traceback.
+            cmd=list(proc.args) + ([f"# stderr: {stderr}"] if stderr else []),
+            output=proc.stdout,
+            stderr=stderr,
+        )
+    return proc
 
 
 def apply_session_diff(
