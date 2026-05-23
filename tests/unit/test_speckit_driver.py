@@ -54,6 +54,28 @@ def test_run_implement_issues_the_command_with_the_routed_model(fake_client):
     assert cmd["model"] == "anthropic/claude-sonnet-4-6"
 
 
+def test_run_fix_issues_the_speckit_fix_command(fake_client):
+    """The project-owned /speckit.fix command — drives a fix-brief's body as
+    the model's primary directive (no tasks.md / plan.md to read). Coder
+    routes here for `SpecKind.FIX`; design specs stay on /speckit.implement."""
+    SpecKitDriver(fake_client).run_fix("sess-1", "the fix-brief body")
+    cmd = fake_client.commands[-1]
+    assert cmd["command"] == "speckit.fix"
+    assert cmd["arguments"] == "the fix-brief body"
+    assert cmd["model"] is None  # default — opencode.json picks the routine model
+
+
+def test_run_fix_routes_to_the_frontier_model_when_passed(fake_client):
+    """Corrective re-prompts on a fix-brief still go to /speckit.fix, but with
+    the frontier model — the same escalation pattern as run_implement."""
+    SpecKitDriver(fake_client).run_fix(
+        "sess-1", "correction body", model="anthropic/claude-sonnet-4-6"
+    )
+    cmd = fake_client.commands[-1]
+    assert cmd["command"] == "speckit.fix"
+    assert cmd["model"] == "anthropic/claude-sonnet-4-6"
+
+
 def test_run_analyze_treats_a_no_issues_report_as_coherent(fake_client):
     """A clean report that mentions 'no inconsistencies' must not be flagged."""
     fake_client.set_command_result(

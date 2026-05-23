@@ -179,6 +179,11 @@ def test_implement_does_not_run_the_coder_when_planning_escalates(fake_client):
 
 
 def test_implement_fix_brief_skips_planning_but_still_codes(fake_client):
+    """Fix-briefs: planning is skipped (no /plan + /tasks + /analyze), but the
+    coder still runs — now via the project-owned /speckit.fix command (the
+    Tier-6 routing change) instead of /speckit.implement, because the fast-path
+    has no plan.md / tasks.md and /speckit.fix treats $ARGUMENTS as the
+    primary directive."""
     ws = InMemoryWorkspace(
         {
             "docs/superpowers/specs/login-fix.md": "## 1. Goal\nfix it",
@@ -191,7 +196,8 @@ def test_implement_fix_brief_skips_planning_but_still_codes(fake_client):
     assert result.status == "implemented"
     commands = [c["command"] for c in fake_client.commands]
     assert "speckit.plan" not in commands
-    assert "speckit.implement" in commands
+    assert "speckit.fix" in commands              # the fix-brief command
+    assert "speckit.implement" not in commands    # NOT the design-spec command
     assert len(fake_client.created_sessions) == 1
 
 

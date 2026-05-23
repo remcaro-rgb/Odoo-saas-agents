@@ -209,11 +209,23 @@ class Coder:
             session_id, inject_context(self.workspace, addon_prefix)
         )
 
-        # Initial implementation pass — routine work on the default (OpenCode Go) model.
-        # For a fix-brief, `spec_text` is the model's only directive (no
-        # plan.md / tasks.md exists); for a design spec it is "" and
-        # /implement reads the planning artifacts instead.
-        self.driver.run_implement(session_id, spec_text)
+        # Pick the right Spec-Kit command for this spec's kind. Fix-briefs go
+        # to the project-owned /speckit.fix (which treats $ARGUMENTS as the
+        # primary directive); design specs stay on /speckit.implement (which
+        # reads the plan.md / tasks.md the planning pipeline produced).
+        is_fix = bool(spec_text)
+
+        def _drive(arguments: str, *, model: str | None = None):
+            if is_fix:
+                return self.driver.run_fix(session_id, arguments, model=model)
+            return self.driver.run_implement(
+                session_id, arguments, model=model
+            )
+
+        # Initial implementation pass — routine work on the default (OpenCode
+        # Go) model. For a fix-brief `spec_text` IS the directive; for a design
+        # spec `spec_text=""` and /implement reads the planning artifacts.
+        _drive(spec_text)
         # Sync OpenCode's writes into self.workspace BEFORE validation sees them.
         self._sync_from_session(session_id)
 
@@ -237,10 +249,10 @@ class Coder:
                 )
                 return ImplementResult("escalated", attempt, findings, gate)
             # Corrective re-prompt — a hard task: route the retry to the frontier
-            # model (plan decision 6).
-            self.driver.run_implement(
-                session_id, correction, model=self.frontier_model
-            )
+            # model (plan decision 6). Stays on the spec's command (fix vs
+            # implement) so the prompt-level directive is consistent through
+            # the whole loop.
+            _drive(correction, model=self.frontier_model)
             # Sync the corrective writes before the next attempt's validation.
             self._sync_from_session(session_id)
         raise AssertionError("unreachable")  # pragma: no cover

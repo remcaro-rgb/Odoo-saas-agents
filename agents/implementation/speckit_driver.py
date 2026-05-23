@@ -46,6 +46,11 @@ class SpecKitDriver:
     TASKS = "speckit.tasks"
     ANALYZE = "speckit.analyze"
     IMPLEMENT = "speckit.implement"
+    # Project-owned slash command for fix-briefs — `$ARGUMENTS` is the *primary*
+    # directive (Spec-Kit's stock /implement treats it as advisory and requires
+    # tasks.md, which the fast-path never produces). See
+    # `opencode/commands/speckit.fix.md`.
+    FIX = "speckit.fix"
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -86,4 +91,21 @@ class SpecKitDriver:
         model (plan decision 6)."""
         return self.client.run_command(
             session_id, self.IMPLEMENT, arguments, model=model
+        )
+
+    def run_fix(
+        self,
+        session_id: str,
+        arguments: str,
+        *,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the project-owned `/speckit.fix`. `arguments` is the fix-brief
+        body — the model's primary directive. Used by `Coder` whenever the
+        spec is a `SpecKind.FIX`, instead of `/speckit.implement` which needs
+        a tasks.md the fix-brief fast-path never produces. Corrective
+        re-prompts on a fix-brief keep coming back here with the frontier
+        model — same escalation pattern as `run_implement`."""
+        return self.client.run_command(
+            session_id, self.FIX, arguments, model=model
         )

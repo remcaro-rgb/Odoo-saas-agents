@@ -153,28 +153,31 @@ def test_implement_scaffolds_boilerplate_for_a_brand_new_addon(fake_client):
 
 
 # -- fix-brief fast-path: spec body as /implement $ARGUMENTS (Tier-5) ---------
-def test_implement_passes_the_fix_brief_body_as_implement_arguments(fake_client):
-    """For a fix-brief (no plan.md / tasks.md), the coder hands the spec body
-    to `/speckit.implement` as its `$ARGUMENTS` so the model has a concrete
-    directive — closes the fix-brief productivity gap that made earlier
-    ACT runs no-ops on PRs #30 and #32."""
+def test_implement_routes_a_fix_brief_to_speckit_fix(fake_client):
+    """A fix-brief (spec_text non-empty) routes to the project-owned
+    /speckit.fix command — never to /speckit.implement. /speckit.fix's prompt
+    treats `$ARGUMENTS` as the *primary* directive, so the model writes the
+    requested change instead of looking for a tasks.md / plan.md that the
+    fix-brief fast-path never produced (Tier 6 — see PRs #32 → #34
+    inconsistency that motivated this)."""
     ws = InMemoryWorkspace(_clean_addon())
     body = "## 1. Symptom\nThe widget is wonky.\n## 5. Proposed fix\nUnwonkify it.\n"
     Coder(SpecKitDriver(fake_client), ws).implement(
         "ses_x", "custom-addons/widget/", spec_text=body
     )
+    fixes = [c for c in fake_client.commands if c["command"] == "speckit.fix"]
     implements = [
         c for c in fake_client.commands if c["command"] == "speckit.implement"
     ]
-    assert implements                          # at least one /implement call
-    # The FIRST /implement carries the spec body as arguments.
-    assert implements[0]["arguments"] == body
+    assert fixes                            # routed to speckit.fix
+    assert fixes[0]["arguments"] == body    # body is the directive
+    assert implements == []                 # NOT to speckit.implement
 
 
-def test_implement_default_spec_text_is_empty_arguments(fake_client):
-    """When no spec_text is passed (design-spec path, plan.md / tasks.md drive
-    /implement), the initial call goes out with empty arguments — preserves the
-    existing design-spec behaviour."""
+def test_implement_routes_a_design_spec_to_speckit_implement(fake_client):
+    """Design-spec path: spec_text="" → /speckit.implement (which reads the
+    plan.md / tasks.md that the design-spec planning pipeline produced).
+    /speckit.fix is NOT used."""
     ws = InMemoryWorkspace(_clean_addon())
     Coder(SpecKitDriver(fake_client), ws).implement(
         "ses_x", "custom-addons/widget/"
@@ -182,8 +185,31 @@ def test_implement_default_spec_text_is_empty_arguments(fake_client):
     implements = [
         c for c in fake_client.commands if c["command"] == "speckit.implement"
     ]
+    fixes = [c for c in fake_client.commands if c["command"] == "speckit.fix"]
     assert implements
     assert implements[0]["arguments"] == ""
+    assert fixes == []
+
+
+def test_implement_corrective_reprompt_for_a_fix_brief_stays_on_speckit_fix(
+    fake_client,
+):
+    """A persistent failure on a fix-brief drives corrective re-prompts to
+    /speckit.fix (with the frontier model) — keeping the whole loop on the
+    fix-brief command instead of mixing /speckit.implement mid-loop."""
+    ws = InMemoryWorkspace(_dirty_addon())
+    Coder(SpecKitDriver(fake_client), ws, max_retries=1).implement(
+        "ses_x", "custom-addons/widget/", spec_text="fix it"
+    )
+    fixes = [c for c in fake_client.commands if c["command"] == "speckit.fix"]
+    implements = [
+        c for c in fake_client.commands if c["command"] == "speckit.implement"
+    ]
+    # Initial + at least one corrective; ALL of them on /speckit.fix.
+    assert len(fixes) >= 2
+    assert implements == []
+    # The corrective re-prompt routes to the frontier model.
+    assert any(c["model"] for c in fixes)
 
 
 # -- session-diff sync (Tier-4 Action ⇄ container workspace sync) -------------
