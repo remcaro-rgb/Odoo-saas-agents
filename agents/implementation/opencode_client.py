@@ -66,7 +66,12 @@ class OpenCodeClient:
         *,
         password: str | None = None,
         username: str | None = None,
-        timeout: float = 300.0,
+        # POST /session/:id/{message,command} blocks until the assistant fully
+        # processes the message (tool calls included). A real ACT-stage
+        # `/speckit.implement` is multi-minute; the default needs comfortable
+        # headroom. The smoke / portability scripts pass a shorter value when
+        # the call is known-fast.
+        timeout: float = 900.0,
     ) -> None:
         self.base_url = (
             base_url or os.environ.get("OPENCODE_BASE_URL") or DEFAULT_BASE_URL
