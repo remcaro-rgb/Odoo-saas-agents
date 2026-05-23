@@ -81,7 +81,8 @@ Set these on the **data-plane repo** (Settings → Secrets and variables → Act
 | `ROLLOUT_STAGE` | `shadow` | `shadow` / `fixtures` / `opt_in` / `default_on`. |
 | `ROLLOUT_FIXTURES` | `123,124` | Comma-separated target ids — used by the `fixtures` stage. |
 | `ROLLOUT_OPT_IN` | `acme/odoo` | Comma-separated target ids — used by the `opt_in` stage. |
-| `GATE1_ENABLED` | `false` | Keep `false` until agentlab exists (Tier 2). |
+| `GATE1_ENABLED` | `true` | Whether the coder loop runs Gate-1 (`ruff check`) before declaring success. |
+| `GATE1_CHECK_SET` | `lint` | `lint` (ruff only — works in the Action runner) or `full` (build + tests — reserved for the agentlab-SSH runner, §7). |
 | `AGENT_REF` | `main` | Git ref/tag of the agent package to install — pin a release tag for production. |
 | `IMPLEMENTATION_BOT_APP_ID` | `1234567` | The `implementation-bot` GitHub App's App ID — see §5. |
 
@@ -182,9 +183,17 @@ the Action log: the structured records show what *would* have been posted.
   (`intent-confirmed`) or `gh pr checkout` the PR (`iterate`). The orchestrator's
   `GitWorkspace.checkout` uses `git checkout -B`; confirm the branch tip is
   present on the first live `fixtures` run.
-- **Gate 1 is off.** `GATE1_ENABLED=false` until the agentlab Odoo build
-  environment exists (Tier 2). Until then the coder runs Odoo-rule validation
-  only — no build/test gate.
+- **Gate 1 — lint only.** `GATE1_ENABLED=true` + `GATE1_CHECK_SET=lint` runs
+  `ruff check {addon}` after each implement attempt (a failure drives a
+  corrective re-prompt with the frontier model — the lint signal the coder
+  loop uses to self-correct). `GATE1_CHECK_SET=full` adds the build + tests
+  checks (`odoo --stop-after-init -d <db> -i <module>`), but those need a
+  running Odoo + Postgres; a vanilla GitHub Actions runner has neither, so
+  `full` is reserved for the future **agentlab-SSH runner** — a `CheckRunner`
+  that SSHes into the running agentlab Fly app (`odoo-saas-odoo-agentlab`,
+  see `docs/superpowers/specs/2026-05-16-agentlab-environment-design.md`)
+  and runs the checks against agentlab's daily-restored masked dataset.
+  Until that runner exists, keep `GATE1_CHECK_SET=lint`.
 - **Notifier is unwired.** Slack escalation routes (`notifier.py`) are built but
   need a webhook secret (Tier 2). Escalations still post a GitHub comment + label.
 - **implement → PR-branch push.** *Wired* (`pushback.py`). After an

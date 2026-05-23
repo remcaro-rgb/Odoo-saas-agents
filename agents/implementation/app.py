@@ -47,6 +47,10 @@ class AgentConfig:
     data_plane_repo: str | None
     workspace_root: str
     gate1_enabled: bool
+    # "lint" (default — `ruff check` only, no Odoo runtime needed in the
+    # Action) or "full" (lint + build + tests — reserved for the future
+    # agentlab-SSH runner; see TIER-1-RUNBOOK.md §7).
+    gate1_check_set: str
     slack_webhook_url: str | None
     # `GH_TOKEN` is the implementation-bot App's installation token, minted in
     # the workflow by actions/create-github-app-token@v1. It pushes the
@@ -75,6 +79,7 @@ class AgentConfig:
             data_plane_repo=env.get("DATA_PLANE_REPO") or None,
             workspace_root=env.get("WORKSPACE_ROOT") or ".",
             gate1_enabled=env.get("GATE1_ENABLED", "false").strip().lower() == "true",
+            gate1_check_set=(env.get("GATE1_CHECK_SET") or "lint").strip().lower(),
             slack_webhook_url=env.get("SLACK_WEBHOOK_URL") or None,
             bot_token=env.get("GH_TOKEN") or None,
             app_id=env.get("IMPLEMENTATION_BOT_APP_ID") or None,
@@ -136,11 +141,19 @@ def build_orchestrator(config: AgentConfig, client: OpenCodeClient) -> Orchestra
     """
     driver = SpecKitDriver(client)
     workspace = GitWorkspace(config.workspace_root)
-    gate1 = (
-        Gate1(SubprocessCheckRunner(cwd=config.workspace_root))
-        if config.gate1_enabled
-        else None
-    )
+    gate1: Gate1 | None
+    if config.gate1_enabled:
+        runner = SubprocessCheckRunner(cwd=config.workspace_root)
+        if config.gate1_check_set == "full":
+            # `full` -> the build + tests checks reach for `odoo` + a Postgres,
+            # which only the future agentlab-SSH runner can provide (§7).
+            gate1 = Gate1(runner)
+        else:
+            # `lint` (the default) runs `ruff check {addon}` only — safe in a
+            # vanilla GitHub-Actions runner, no Odoo runtime required.
+            gate1 = Gate1(runner, checks=(("lint", "ruff check {addon}"),))
+    else:
+        gate1 = None
     return Orchestrator(workspace, driver, repo=config.data_plane_repo, gate1=gate1)
 
 

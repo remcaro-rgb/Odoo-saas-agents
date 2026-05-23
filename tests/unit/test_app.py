@@ -147,6 +147,42 @@ def test_build_orchestrator_wires_gate1_when_enabled(fake_client):
     assert isinstance(orch.gate1, Gate1)
 
 
+def test_build_orchestrator_gate1_lint_only_by_default(fake_client):
+    """`GATE1_CHECK_SET` defaults to `lint`: Gate 1 runs only `ruff check`. The
+    Action runner has no Odoo / Postgres, so build / tests would always fail
+    in vanilla CI — defer those to the agentlab-SSH path (§7)."""
+    config = AgentConfig.from_env(
+        {"DATA_PLANE_REPO": "acme/odoo", "GATE1_ENABLED": "true"}
+    )
+    orch = build_orchestrator(config, fake_client)
+    assert orch.gate1 is not None
+    names = [name for name, _ in orch.gate1.checks]
+    assert names == ["lint"]
+
+
+def test_build_orchestrator_gate1_full_set_keeps_all_three_checks(fake_client):
+    """`GATE1_CHECK_SET=full` restores the build + tests checks for the future
+    agentlab-SSH runner; the lint check stays first."""
+    config = AgentConfig.from_env(
+        {
+            "DATA_PLANE_REPO": "acme/odoo",
+            "GATE1_ENABLED": "true",
+            "GATE1_CHECK_SET": "full",
+        }
+    )
+    orch = build_orchestrator(config, fake_client)
+    assert orch.gate1 is not None
+    names = [name for name, _ in orch.gate1.checks]
+    assert names == ["lint", "build", "tests"]
+
+
+def test_agent_config_reads_gate1_check_set_with_default_lint():
+    assert AgentConfig.from_env({}).gate1_check_set == "lint"
+    assert (
+        AgentConfig.from_env({"GATE1_CHECK_SET": "full"}).gate1_check_set == "full"
+    )
+
+
 # -- build_github --------------------------------------------------------------
 def test_build_github_act_returns_a_real_client():
     github = build_github("acme/odoo", RolloutDecision.ACT)
