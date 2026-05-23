@@ -40,10 +40,13 @@ def _text_part(text: str) -> dict[str, Any]:
 
 
 def _model_ref(model: str) -> dict[str, str]:
-    """Split a ``"<provider>/<model>"`` string into OpenCode's model object.
+    """Split a ``"<provider>/<model>"`` string into the OBJECT shape that
+    OpenCode's ``POST /session/:id/message`` endpoint expects (rejects a bare
+    string with ``"Expected object | null"``).
 
-    The message / command API rejects a bare string at ``model`` ("Expected
-    object | null") — it wants ``{"providerID": ..., "modelID": ...}``.
+    NOTE: ``POST /session/:id/command`` is the inverse — it expects a STRING and
+    rejects an object with ``"Expected string | null"``. The asymmetry is the
+    OpenCode API's, not ours; `run_command` keeps the model string as-is.
     """
     provider, _, model_id = model.partition("/")
     return {"providerID": provider, "modelID": model_id}
@@ -167,7 +170,9 @@ class OpenCodeClient:
         """
         body: dict[str, Any] = {"command": command, "arguments": arguments}
         if model:
-            body["model"] = _model_ref(model)
+            # /command takes `model` as a bare "<provider>/<model>" string —
+            # the inverse of /message (which wants an object). See `_model_ref`.
+            body["model"] = model
         if agent:
             body["agent"] = agent
         return self._request("POST", f"/session/{session_id}/command", json=body)
