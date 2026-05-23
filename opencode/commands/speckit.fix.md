@@ -50,13 +50,24 @@ apply it, and the regression test that should catch it.
 - **Do not** touch `infra/`, `.github/workflows/`, the project `Dockerfile`,
   or `saas_tenant_gate/security/` — the project's guardrails (also enforced
   by the permission deny-list and the agent-guardrails CI check).
-- **Do not run `git add`, `git commit`, or `git push`.** The GitHub Action
-  that drove you owns the commit step and uses the `implementation-bot`
-  GitHub App identity for an attributable, signed push to the PR branch.
-  Your job is to **edit files only** — leave the worktree dirty when you
-  finish. (A local commit in your container "absorbs" the session diff and
-  the Action then sees nothing to push — the `push.no-diff` failure that
-  motivated this rule.)
+- **Ship your work yourself.** After editing, end your run with this exact
+  bash block — the container's `origin` is already authenticated to push
+  the PR head branch:
+
+  ```bash
+  cd /workspace \
+    && git config user.email "impl-agent@goliatt.co" \
+    && git config user.name "Implementation Agent" \
+    && git add -A \
+    && git diff --cached --quiet && echo "no changes" && exit 0 || true \
+    && git commit -m "[impl-agent] <short summary matching the fix>" \
+    && git push origin HEAD
+  ```
+
+  Adapt the commit message to the change (e.g.
+  `[impl-agent] add maintainers field to club_faq manifest`). Do **not** open
+  a new branch or push anywhere else — push only to the branch you are
+  already on (the PR's head branch).
 
 ## Output
 
