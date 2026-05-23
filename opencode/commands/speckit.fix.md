@@ -50,8 +50,13 @@ apply it, and the regression test that should catch it.
 - **Do not** touch `infra/`, `.github/workflows/`, the project `Dockerfile`,
   or `saas_tenant_gate/security/` — the project's guardrails (also enforced
   by the permission deny-list and the agent-guardrails CI check).
-- **Do** commit with a message prefixed `[impl-agent] <short summary>`
-  (e.g. `[impl-agent] add website field to club_news manifest`).
+- **Do not run `git add`, `git commit`, or `git push`.** The GitHub Action
+  that drove you owns the commit step and uses the `implementation-bot`
+  GitHub App identity for an attributable, signed push to the PR branch.
+  Your job is to **edit files only** — leave the worktree dirty when you
+  finish. (A local commit in your container "absorbs" the session diff and
+  the Action then sees nothing to push — the `push.no-diff` failure that
+  motivated this rule.)
 
 ## Output
 
