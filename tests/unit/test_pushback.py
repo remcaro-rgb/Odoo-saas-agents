@@ -160,6 +160,112 @@ def test_apply_session_diff_creates_an_added_file(tmp_path):
     assert (tmp_path / "new.txt").read_text() == "hello, new\n"
 
 
+def _opencode_added_patch(path: str, body: str) -> str:
+    """Return an OpenCode-style ADD patch for ``path`` with content ``body``.
+
+    Matches the shadow-git format observed live on probe session
+    ``ses_1a8f4c29effeUMS10Ho63UvuQ9``: SVN-style ``Index:`` / ``===``
+    preamble, the file path on BOTH ``---`` and ``+++`` headers (no
+    ``/dev/null`` marker — git apply interprets that as "modify a missing
+    file" and errors), and a single ``@@ -0,0 +1,N @@`` hunk.
+    """
+    # Body line count for the `@@` header — every line in body INCLUDING a
+    # trailing empty after the final \n. We count `+ <line>` rows we emit.
+    lines = body.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]      # drop trailing empty after final newline
+    plus = "".join("+" + line + "\n" for line in lines)
+    return (
+        f"Index: {path}\n"
+        "===================================================================\n"
+        f"--- {path}\t\n"
+        f"+++ {path}\t\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n"
+        f"{plus}"
+    )
+
+
+def test_apply_session_diff_writes_added_files_directly_bypassing_git_apply(
+    tmp_path,
+):
+    """For ``status == "added"`` entries, extract the ``+``-prefixed content
+    from the unified-diff body and write it to disk directly — do NOT funnel
+    them through ``git apply``.
+
+    Why: OpenCode's shadow-git emits new-file patches with ``--- <path>`` /
+    ``+++ <path>`` (no ``/dev/null`` marker), which ``git apply`` interprets
+    as a modify against a non-existent base and errors with
+    ``No such file or directory`` — particularly when concatenated with
+    other failing patches in the same blob (git apply is atomic over its
+    input: if ANY patch fails, none land). Writing added files directly
+    avoids that whole class of failure.
+
+    Regression — Tier-7 PR #36 (GoliattCo/odoo-custom run 26346017264)
+    crashed at ``pushback._git("apply", ...)`` with
+    ``custom-addons/club_events/tests/test_manifest.py: No such file or
+    directory`` on the new test file the agent emitted.
+    """
+    _init_repo(tmp_path)
+    target = "custom-addons/club_events/tests/test_manifest.py"
+    body = (
+        "import ast\n"
+        "import unittest\n"
+        "\n"
+        "\n"
+        "class T(unittest.TestCase):\n"
+        "    pass\n"
+    )
+    patch = _opencode_added_patch(target, body)
+    applied = apply_session_diff(
+        str(tmp_path),
+        [{"file": target, "patch": patch, "status": "added"}],
+    )
+    assert applied == 1
+    assert (tmp_path / target).read_text() == body
+
+
+def test_apply_session_diff_writes_added_file_alongside_failing_modify(tmp_path):
+    """git apply is atomic across multiple concatenated patches: if ANY
+    patch fails, NONE land. So even though a single new-file patch could
+    apply through git, in production it's bundled with modify patches that
+    might fail (e.g. stale-base — see Tier-7 retry #4). The added-file
+    write must therefore NOT depend on the modify patch succeeding.
+
+    This test pairs a clean new-file ADD with a broken modify (wrong base
+    content). The ADD must land regardless; the MODIFY raises.
+    """
+    _init_repo(tmp_path)
+    target = "new_file.txt"
+    patch_added = _opencode_added_patch(target, "fresh content\n")
+    # A modify whose context doesn't match initial.txt's actual contents
+    # ("initial\n") — guaranteed to make `git apply` fail.
+    patch_bad_modify = (
+        "Index: initial.txt\n"
+        "===================================================================\n"
+        "--- initial.txt\t\n"
+        "+++ initial.txt\t\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-something_that_is_not_actually_there\n"
+        "+something_else\n"
+    )
+    try:
+        apply_session_diff(
+            str(tmp_path),
+            [
+                {"file": target, "patch": patch_added, "status": "added"},
+                {"file": "initial.txt", "patch": patch_bad_modify, "status": "modified"},
+            ],
+        )
+    except subprocess.CalledProcessError:
+        # Expected — the modify is bad. But the added file MUST have
+        # landed beforehand (or by a separate path that doesn't share
+        # git apply's atomicity).
+        pass
+    assert (tmp_path / target).read_text() == "fresh content\n", (
+        "added-file write must be independent of the modify-patch apply"
+    )
+
+
 def test_apply_session_diff_modifies_an_existing_file(tmp_path):
     _init_repo(tmp_path)
     patch = _generate_patch(tmp_path, "initial.txt", "initial\nadded line\n")

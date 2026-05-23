@@ -24,6 +24,7 @@ Requires the implementation-bot GitHub App's **Contents** permission to be
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import Any, Protocol
 
@@ -32,6 +33,37 @@ from .provisioning import is_protected_path
 from .rollout import RolloutDecision
 
 BOT_NAME = "implementation-bot[bot]"
+
+
+def _extract_added_content(patch: str) -> str:
+    """Pull the new-file content out of an OpenCode-style ADD unified diff.
+
+    OpenCode's shadow-git emits ADDs with ``--- <path>`` / ``+++ <path>``
+    (NO ``/dev/null`` marker — git apply would interpret that as "modify a
+    missing file"), so we cannot let `git apply` handle them: when bundled
+    with other failing patches in the same `git apply` call (git apply is
+    atomic over its input), the ADD silently never lands. Strip the headers
+    and hunk markers, take every ``+``-prefixed line as content.
+
+    Tolerates the trailing-tab `\\t` that OpenCode appends to the
+    ``--- `` / ``+++ `` headers and the SVN-style ``Index:`` / ``===``
+    preamble. Skips the ``+++`` header itself (which starts with ``+``
+    but is not content).
+    """
+    out: list[str] = []
+    in_body = False
+    for line in patch.split("\n"):
+        if not in_body:
+            if line.startswith("@@"):
+                in_body = True
+            continue
+        if line.startswith("+"):
+            # `+++` headers don't appear in the body — they live above the
+            # first `@@`. Inside the body, any `+`-prefixed row is content.
+            out.append(line[1:])
+        # ` ` (context) and `-` (removal) rows are not present in an ADD
+        # but we'd skip them anyway — only `+` lines carry new content.
+    return "\n".join(out)
 
 
 class _DiffClient(Protocol):
@@ -73,12 +105,25 @@ def _git(
 def apply_session_diff(
     workspace_root: str, diffs: list[dict[str, Any]]
 ) -> int:
-    """Apply OpenCode's `SnapshotFileDiff[]` to `workspace_root` via git apply.
+    """Apply OpenCode's `SnapshotFileDiff[]` to `workspace_root`.
 
-    Returns the number of file entries whose `patch` payload was non-empty (and
-    therefore included in the applied patch). Entries with no `patch` (only a
-    summary) are silently skipped — this happens for diffs OpenCode tracks at
-    metadata level but cannot reconstruct as a patch.
+    Two paths, split on the entry's ``status``:
+
+    * ``status == "added"`` — extract the new-file content from the patch
+      (``+``-prefixed body) and write it directly. OpenCode's ADD patches
+      use ``--- <path>`` / ``+++ <path>`` (no ``/dev/null`` marker), which
+      ``git apply`` interprets as "modify a missing file" and rejects.
+      Writing directly also sidesteps git apply's atomicity — when bundled
+      with a failing modify patch, the ADD would never land otherwise.
+    * everything else (``"modified"``, missing status) — collected into one
+      unified-diff blob, applied via ``git apply -p0``. ``-p0`` because
+      OpenCode's headers carry no ``a/`` / ``b/`` prefix.
+
+    Returns the number of file entries acted on (write + apply combined).
+    Entries with no ``patch`` (only a summary) are silently skipped — this
+    happens for diffs OpenCode tracks at metadata level but cannot
+    reconstruct as a patch. Protected guardrail paths are filtered out as
+    defence in depth on top of the container's sparse-checkout.
     """
     if not diffs:
         return 0
@@ -94,10 +139,25 @@ def apply_session_diff(
         patch = str(entry.get("patch", "")).rstrip("\n")
         if not patch.strip():
             continue
+        status = str(entry.get("status", "")).lower()
+        if status == "added":
+            # Write the new file directly — bypassing `git apply` (see
+            # docstring + `_extract_added_content`).
+            target = os.path.join(workspace_root, path)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            content = _extract_added_content(patch)
+            # OpenCode includes the trailing newline that the file had on
+            # disk; if the body has it, keep it. Patches for files with no
+            # trailing newline mark that with `\ No newline at end of file`
+            # which `_extract_added_content` does NOT propagate — write as-is.
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(content + ("\n" if not content.endswith("\n") else ""))
+            applied += 1
+            continue
         pieces.append(patch)
         applied += 1
-    if applied == 0:
-        return 0
+    if not pieces:
+        return applied
     blob = "\n".join(pieces) + "\n"
     try:
         # `-p0` keeps paths as-is. OpenCode's shadow-git unified diffs lack
