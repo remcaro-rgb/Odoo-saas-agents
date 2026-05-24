@@ -169,13 +169,67 @@ def apply_session_diff(
         # (Tier-7 follow-up).
         _git(workspace_root, "apply", "-p0", "--whitespace=nowarn", "-", stdin=blob)
     except subprocess.CalledProcessError:
-        # Likely already applied — `Coder._sync_from_session` runs the same
-        # apply inside the implement loop, then `push_implementation` here
-        # re-fetches `get_diff` and tries again. Confirm via reverse-check;
-        # if the patch IS already in the tree, the diff is a no-op here.
-        # Otherwise the patch is genuinely bad and we re-raise.
-        _git(workspace_root, "apply", "-p0", "--reverse", "--check", "-", stdin=blob)
+        # Forward apply failed — could be: (a) idempotent re-apply (the
+        # patch is already in the tree from `Coder._sync_from_session`'s
+        # earlier apply during the implement loop), or (b) a genuine
+        # mismatch. Reverse-check: if the patch IS already in the tree,
+        # `git apply --reverse --check` succeeds (no-op). Otherwise it
+        # fails — and BEFORE re-raising, dump the on-disk file bytes +
+        # the blob so the resulting CalledProcessError carries a real
+        # diagnostic in production logs. Without this, the only signal
+        # is the cryptic `patch failed: <file>:1` from git, which doesn't
+        # reveal WHICH bytes diverged from the patch's expected context.
+        try:
+            _git(workspace_root, "apply", "-p0", "--reverse", "--check", "-", stdin=blob)
+        except subprocess.CalledProcessError:
+            _dump_apply_failure_state(workspace_root, diffs, blob)
+            raise
     return applied
+
+
+def _dump_apply_failure_state(
+    workspace_root: str,
+    diffs: list[dict[str, Any]],
+    blob: str,
+) -> None:
+    """Print a diagnostic when `git apply` rejects a patch — the on-disk
+    bytes of every target file, side-by-side with the patch's expected
+    context. Identifies line-ending / whitespace / EOL differences that
+    git's `patch failed: <file>:1` doesn't reveal on its own.
+
+    No-op-safe (best-effort): a failure here must not mask the original
+    CalledProcessError, so the whole body is wrapped in try/except.
+    """
+    import hashlib
+    import sys
+    try:
+        sys.stderr.write("\n=== pushback apply failure diagnostic ===\n")
+        sys.stderr.write(f"workspace_root={workspace_root}\n")
+        sys.stderr.write(f"blob bytes={len(blob)} sha1={hashlib.sha1(blob.encode()).hexdigest()}\n")
+        for entry in diffs:
+            path = str(entry.get("file") or "")
+            target = os.path.join(workspace_root, path)
+            status = entry.get("status")
+            on_disk = "MISSING"
+            sha = "-"
+            head_repr = ""
+            if os.path.exists(target):
+                with open(target, "rb") as fh:
+                    raw = fh.read()
+                sha = hashlib.sha1(raw).hexdigest()
+                head_repr = repr(raw[:160])
+                on_disk = f"{len(raw)} bytes"
+            sys.stderr.write(
+                f"  - {path} status={status!r} disk={on_disk} sha1={sha}\n"
+                f"    head={head_repr}\n"
+            )
+        sys.stderr.write("--- blob (first 800 bytes) ---\n")
+        sys.stderr.write(blob[:800])
+        sys.stderr.write("\n=== end diagnostic ===\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001  pragma: no cover
+        # Best-effort: never mask the apply error.
+        pass
 
 
 def commit_and_push(
