@@ -46,6 +46,13 @@ from .github_io import (
     handle_webhook,
 )
 from .pushback import push_spec
+from .run_store import (
+    PHASE_ESCALATED,
+    PHASE_INTENT_CONFIRMED,
+    DraftRecord,
+    RunStore,
+    build_run_store,
+)
 from .session_store import JsonFileSessionStore, SessionStore
 
 # `EventLog` tags every record with its `agent` field — overridden via the
@@ -272,9 +279,10 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         orchestrator = build_orchestrator(config, client, decision=decision)
         github = build_github(config.data_plane_repo, decision)
         sessions = build_session_store(config)
+        run_store = build_run_store_from_env(config, sessions, env)
         result = handle_webhook(
             event_name, payload, orchestrator, github,
-            session_store=sessions,
+            session_store=run_store,
         )
         duration_ms = int((time.monotonic() - handle_start) * 1000)
         if isinstance(result, DraftResult):
@@ -290,8 +298,19 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
             )
             for note in result.notes:
                 log.emit("note", text=note)
+            # Tier 3 state writes: every successful draft inserts a row, every
+            # escalation marks the existing row (if any) as escalated. SHADOW
+            # skips state writes since nothing else is real either.
+            if decision is not RolloutDecision.SHADOW:
+                _record_outcome_state(run_store, result, log)
             # Tier 2 push-back: write the spec, push the branch, open the PR.
-            _maybe_push_spec(config, decision, result, log)
+            pr_number = _maybe_push_spec(config, decision, result, log)
+            if (
+                decision is not RolloutDecision.SHADOW
+                and pr_number is not None
+                and result.issue is not None
+            ):
+                run_store.record_pr_opened(result.issue, pr_number)
         elif result is not None:
             log.emit(
                 "iteration",
@@ -302,6 +321,8 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
             )
             for note in result.notes:
                 log.emit("note", text=note)
+            if decision is not RolloutDecision.SHADOW:
+                _record_iteration_state(run_store, result, payload)
         _log_shadow_record(log, github)
     except Exception as exc:
         traceback.print_exc()
@@ -345,15 +366,27 @@ def _tag_spec_generator(log: EventLog) -> None:
 
 
 def build_session_store(config: AgentConfig) -> SessionStore:
-    """The persistence layer for PR -> OpenCode-session-id (Tier 2).
+    """The Tier-2 JSON-file fallback for session-id storage.
 
-    Lives at ``<workspace>/.spec-generator-sessions.json``. Checking the
-    file into the repo is acceptable for low-volume Tier 2; Tier 3 swaps
-    in a Postgres-backed `spec_generator_runs` store without changing this
-    function's signature.
+    Tier 3's `PostgresRunStore` is the primary store; this fallback is
+    still wired so a transient Postgres outage doesn't break the
+    iterate workflow (the run store delegates `get/set/delete` here on
+    DB error).
     """
     path = os.path.join(config.workspace_root, ".spec-generator-sessions.json")
     return JsonFileSessionStore(path)
+
+
+def build_run_store_from_env(
+    config: AgentConfig, sessions: SessionStore, env: Mapping[str, str]
+) -> RunStore:
+    """The Tier-3 phase-transition writer.
+
+    Reads `CONTROL_PLANE_PG_DSN` from `env`. Unset → `NoOpRunStore` (the
+    agent still works but writes nothing to `spec_generator_runs`).
+    """
+    # Mapping[str, str] -> plain dict for the helper.
+    return build_run_store(dict(env), sessions=sessions)
 
 
 def _maybe_push_spec(
@@ -361,8 +394,11 @@ def _maybe_push_spec(
     decision: RolloutDecision,
     result: DraftResult,
     log: EventLog,
-) -> None:
+) -> int | None:
     """Push the drafted spec + open the PR — Tier 2's ACT path.
+
+    Returns the PR number when one was opened (or already existed for the
+    spec branch); `None` when the push was skipped or short-circuited.
 
     A no-op unless:
       - The drafter produced a non-empty body.
@@ -373,18 +409,18 @@ def _maybe_push_spec(
     intent and returns), so a SHADOW run still emits the audit record.
     """
     if result.drafted is None or not result.drafted.body.strip():
-        return
+        return None
     if not (config.bot_token and config.data_plane_repo):
         log.emit(
             "push-skipped",
             reason="no bot token — Tier 2 App not provisioned yet",
         )
-        return
+        return None
     push_url = (
         f"https://x-access-token:{config.bot_token}"
         f"@github.com/{config.data_plane_repo}.git"
     )
-    push_spec(
+    return push_spec(
         workspace_root=config.workspace_root,
         spec_path=result.drafted.path,
         spec_body=result.drafted.body,
@@ -396,6 +432,67 @@ def _maybe_push_spec(
         log=log,
         app_id=config.app_id,
     )
+
+
+def _record_outcome_state(
+    run_store: RunStore, result: DraftResult, log: EventLog
+) -> None:
+    """Persist the orchestrator's draft outcome into ``spec_generator_runs``.
+
+    Drafted -> INSERT (UPSERT on the unique issue_number index) so re-runs
+    on the same issue UPDATE in place. Escalated -> existing-row UPDATE to
+    `phase=escalated` only when a row already exists; we don't INSERT a
+    blank row for an issue we never drafted against.
+    """
+    if result.issue is None:
+        return
+    if result.status == "drafted" and result.drafted is not None:
+        kind_str = (
+            result.kind.kind.value if result.kind is not None else "unknown"
+        )
+        confidence = (
+            float(result.kind.confidence) if result.kind is not None else 0.0
+        )
+        run_store.record_draft(
+            DraftRecord(
+                issue=result.drafted.issue,
+                kind=kind_str,
+                confidence=confidence,
+                branch=result.drafted.branch,
+                spec_path=result.drafted.path,
+                opencode_session_id=result.drafted.session_id,
+                metadata={
+                    "open_questions": len(result.drafted.open_questions),
+                    "captured_items": len(result.drafted.captured_items),
+                },
+            )
+        )
+        log.emit("state-recorded", issue=result.issue, phase="drafted")
+    elif result.status == "escalated":
+        run_store.record_phase(result.issue, PHASE_ESCALATED)
+        log.emit("state-recorded", issue=result.issue, phase="escalated")
+
+
+def _record_iteration_state(
+    run_store: RunStore, outcome: Any, payload: Mapping[str, Any]
+) -> None:
+    """Persist refiner outcomes (Tier 2 reporter Q&A).
+
+    The orchestrator emits an IterationOutcome with `status` in {handed_off,
+    clarified, reclassified, ignored}. `handed_off` advances to
+    `intent_confirmed` (the handoff to the Implementation Agent). Every
+    refiner run bumps `last_reporter_activity_at` so the sweep's silence
+    timer resets.
+    """
+    issue_number = (payload.get("issue") or {}).get("number")
+    if issue_number is None:
+        return
+    issue = int(issue_number)
+    # Every refiner run = reporter activity (the comment came from a human).
+    run_store.record_reporter_activity(issue)
+    status = getattr(outcome, "status", "")
+    if status == "handed_off":
+        run_store.record_phase(issue, PHASE_INTENT_CONFIRMED)
 
 
 def _intake_title_from_result(result: DraftResult) -> str:
