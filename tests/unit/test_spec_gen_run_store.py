@@ -18,7 +18,6 @@ from agents.spec_generator.run_store import (
 )
 from agents.spec_generator.session_store import InMemorySessionStore
 
-
 # ---------------------------------------------------------------------------
 # InMemoryRunStore — the test fixture itself
 # ---------------------------------------------------------------------------
