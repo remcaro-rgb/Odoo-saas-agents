@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -261,6 +262,12 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
 
     client = build_opencode_client(config)
     result: DraftResult | Any | None = None
+    # Wall-clock at the start of the agent's "real work" — used by Tier 6's
+    # `Median time issue -> draft PR (ms)` panel. We measure from after the
+    # rollout gate (so SHADOW + ACT runs are comparable) up to the outcome
+    # emit, which is the latest moment that's still "agent did the work";
+    # the push happens *after* outcome and is reported separately.
+    handle_start = time.monotonic()
     try:
         orchestrator = build_orchestrator(config, client, decision=decision)
         github = build_github(config.data_plane_repo, decision)
@@ -269,6 +276,7 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
             event_name, payload, orchestrator, github,
             session_store=sessions,
         )
+        duration_ms = int((time.monotonic() - handle_start) * 1000)
         if isinstance(result, DraftResult):
             log.emit(
                 "outcome",
@@ -278,6 +286,7 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
                     result.skip_reason.value if result.skip_reason is not None else None
                 ),
                 shadow=decision is RolloutDecision.SHADOW,
+                duration_ms=duration_ms,
             )
             for note in result.notes:
                 log.emit("note", text=note)
@@ -289,6 +298,7 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
                 intent=getattr(result.intent, "value", str(result.intent)),
                 status=result.status,
                 shadow=decision is RolloutDecision.SHADOW,
+                duration_ms=duration_ms,
             )
             for note in result.notes:
                 log.emit("note", text=note)

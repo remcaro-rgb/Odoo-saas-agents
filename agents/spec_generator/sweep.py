@@ -48,6 +48,12 @@ class SweepDecision:
     action: str  # "confirm" | "skip" | "no-spec"
     reason: str
     notes: list[str] = field(default_factory=list)
+    # Tier 6 dashboard: milliseconds since the spec file's last edit. Only
+    # populated for ``action == "confirm"`` (the only decision shape where
+    # an elapsed measurement is meaningful — skip/no-spec carry no useful
+    # latency signal). Surfaces as the "Median time draft -> intent-confirmed
+    # (ms)" panel in Axiom.
+    elapsed_ms: int | None = None
 
 
 @dataclass
@@ -288,10 +294,12 @@ def run_sweep(
             ))
             continue
 
+        elapsed = (now - last_modified).total_seconds() * 1000
         decisions.append(SweepDecision(
             pr=pr_number, branch=branch, spec_path=spec_path,
             action="confirm",
             reason="silent + no open questions",
+            elapsed_ms=int(elapsed),
         ))
         if act:
             client.add_pr_label(pr_number, INTENT_CONFIRMED_LABEL)
