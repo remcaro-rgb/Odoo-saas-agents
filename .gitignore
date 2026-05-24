@@ -11,9 +11,20 @@ venv/
 .env.*
 !.env.example
 
+# GitHub App private keys (impl-bot + spec-generator-bot pems live here locally)
+keys/
+*.pem
+
 # OpenCode local state / session data
 opencode-data/
 *.db
+
+# Spec Generator runtime state (Tier 2 JsonFileSessionStore default path)
+.spec-generator-sessions.json
+.agent-events/
+
+# Local venvs created by ad-hoc runs
+.venv-spec-gen/
 
 # OS
 .DS_Store

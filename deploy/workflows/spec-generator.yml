@@ -1,0 +1,86 @@
+# Spec Generator Agent — issue-trigger workflow (Tier 1).
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/` directory
+# (the repo issues are filed against — the same repo the implementation agent
+# acts on). It is version-controlled here next to the agent code, but is INERT
+# in this repo — it is not under `.github/`. See docs/SPEC-GEN-TIER-1-RUNBOOK.md
+# for the deploy steps, secrets and repo variables.
+#
+# Fires when an issue is opened or labeled with a routing label
+# (feature-request / bug / spec-refinement-needed). Tier 1 runs in SHADOW
+# only — the orchestrator drafts everything but the SHADOW client posts
+# nothing. Tier 2 wires the `spec-generator-bot` App and flips
+# ROLLOUT_STAGE -> fixtures/opt_in.
+name: Spec Generator Agent
+
+on:
+  issues:
+    types: [opened, labeled]
+
+concurrency:
+  # Serialise runs on the same issue — opened + labeled can fire back-to-back
+  # within seconds and the orchestrator's session creation must not race.
+  group: spec-gen-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # push the spec branch (Tier 2 ACT)
+  issues: write     # post the summary comment + add labels (Tier 2 ACT)
+  pull-requests: write  # open the spec PR (Tier 2 ACT)
+
+jobs:
+  draft:
+    # The webhook adapter re-checks the label; this guard only avoids spinning
+    # an idle runner when a non-routing label is applied. `opened` always
+    # qualifies because the orchestrator may still pick up a kind hint from
+    # the initial label set.
+    if: >-
+      github.event.action == 'opened' ||
+      (github.event.action == 'labeled' && contains(fromJson('["feature-request", "bug", "spec-refinement-needed"]'), github.event.label.name))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the data-plane repo
+        uses: actions/checkout@v4
+        with:
+          # Shallow is fine — the Spec Generator does not need history.
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Spec Generator
+        # Pinned to the same `AGENT_REF` var the implementation agent uses so
+        # a single ref bump flips both agents in lockstep (they import the
+        # same `agents.implementation` submodules — opencode_client, rollout,
+        # observability, notifier).
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
+
+      - name: Mint a token for the spec-generator-bot GitHub App
+        id: bot_token
+        # The App is optional in SHADOW (no writes) — only mint when the
+        # variable is present so SHADOW-only deployments don't fail.
+        if: ${{ vars.SPEC_GENERATOR_BOT_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          private-key: ${{ secrets.SPEC_GENERATOR_BOT_PRIVATE_KEY }}
+
+      - name: Run the agent (SHADOW mode default)
+        env:
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
+          OPENCODE_SERVER_PASSWORD: ${{ secrets.OPENCODE_SERVER_PASSWORD }}
+          DATA_PLANE_REPO: ${{ github.repository }}
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          # `ROLLOUT_STAGE` defaults to `shadow` inside `Rollout.from_env` —
+          # explicit assignment here surfaces the intent at the workflow
+          # surface. Flip to `fixtures` / `opt_in` / `default_on` in Tier 2+.
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          ROLLOUT_STAGE: ${{ vars.SPEC_GEN_ROLLOUT_STAGE || 'shadow' }}
+          ROLLOUT_FIXTURES: ${{ vars.SPEC_GEN_ROLLOUT_FIXTURES }}
+          ROLLOUT_OPT_IN: ${{ vars.SPEC_GEN_ROLLOUT_OPT_IN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SPEC_GENERATOR_BOT_APP_ID: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token }}
+        run: python -m agents.spec_generator

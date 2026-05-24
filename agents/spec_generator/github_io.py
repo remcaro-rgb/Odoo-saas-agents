@@ -1,0 +1,362 @@
+"""GitHub write-back + the webhook handler for the Spec Generator.
+
+The orchestrator's write boundary with GitHub: post the agent's issue / PR
+comments, add labels, read live label sets. `IssueClient` is a Protocol seam —
+unit tests run against `FakeIssueClient`, the SHADOW client wraps a real one
+and records intents instead of firing them, and `GhCliIssueClient` shells out
+to the `gh` CLI for the ACT path.
+
+`handle_webhook` is the top-level entry point: it maps a webhook to a Spec
+Generator `Event`, runs the orchestrator's `draft_spec` flow, and writes the
+resulting `DraftResult.comments` / `labels` back to GitHub.
+
+Tier 1 scope: the `issues.opened` and `issues.labeled` paths. The
+`issue_comment.created` path is wired but currently delegates straight to a
+"skipped" result (the reporter Q&A loop is Tier 2 — see `refiner.py`).
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from typing import Any, Protocol, runtime_checkable
+
+from .core import DraftResult, Orchestrator, SkipReason
+from .events import Event, EventType
+from .github_adapter import event_from_webhook
+from .refiner import IterationOutcome
+from .session_store import InMemorySessionStore, SessionStore
+
+
+@runtime_checkable
+class IssueClient(Protocol):
+    """The GitHub operations the Spec Generator's write side needs."""
+
+    def issue_labels(self, issue: int) -> list[str]: ...
+    def post_issue_comment(self, issue: int, body: str) -> None: ...
+    def post_pr_comment(self, pr: int, body: str) -> None: ...
+    def add_issue_label(self, issue: int, label: str) -> None: ...
+    def add_pr_label(self, pr: int, label: str) -> None: ...
+    def issue_comments(self, issue: int) -> list[str]: ...
+    def pr_comments(self, pr: int) -> list[str]: ...
+
+
+class FakeIssueClient:
+    """In-memory `IssueClient` — records calls, returns canned data.
+
+    Used by unit tests, and doubles as the in-memory shadow client for
+    SHADOW-mode runs that don't even need a real reader (the fixture
+    contains everything).
+    """
+
+    def __init__(
+        self,
+        labels_by_issue: dict[int, list[str]] | None = None,
+        comments_by_issue: dict[int, list[str]] | None = None,
+        comments_by_pr: dict[int, list[str]] | None = None,
+    ) -> None:
+        self.issue_comments_posted: list[tuple[int, str]] = []
+        self.pr_comments_posted: list[tuple[int, str]] = []
+        self.issue_labels_added: list[tuple[int, str]] = []
+        self.pr_labels_added: list[tuple[int, str]] = []
+        self._labels: dict[int, list[str]] = {
+            int(k): list(v) for k, v in (labels_by_issue or {}).items()
+        }
+        self._issue_comments: dict[int, list[str]] = {
+            int(k): list(v) for k, v in (comments_by_issue or {}).items()
+        }
+        self._pr_comments: dict[int, list[str]] = {
+            int(k): list(v) for k, v in (comments_by_pr or {}).items()
+        }
+
+    def issue_labels(self, issue: int) -> list[str]:
+        return list(self._labels.get(issue, []))
+
+    def post_issue_comment(self, issue: int, body: str) -> None:
+        self.issue_comments_posted.append((issue, body))
+
+    def post_pr_comment(self, pr: int, body: str) -> None:
+        self.pr_comments_posted.append((pr, body))
+
+    def add_issue_label(self, issue: int, label: str) -> None:
+        self.issue_labels_added.append((issue, label))
+
+    def add_pr_label(self, pr: int, label: str) -> None:
+        self.pr_labels_added.append((pr, label))
+
+    def issue_comments(self, issue: int) -> list[str]:
+        return list(self._issue_comments.get(issue, []))
+
+    def pr_comments(self, pr: int) -> list[str]:
+        return list(self._pr_comments.get(pr, []))
+
+
+class GhCliIssueClient:
+    """A `IssueClient` backed by the `gh` CLI.
+
+    Integration-verified against a live repo (not unit-tested; it is a thin
+    subprocess wrapper). Mirrors `GhCliClient` in the implementation agent —
+    the same `_gh` helper shape, the same warn-and-continue posture for label
+    failures (the comment is the primary signal; the label is secondary).
+    """
+
+    def __init__(self, repo: str) -> None:
+        self.repo = repo
+
+    def _gh(self, *args: str) -> str:
+        result = subprocess.run(
+            ["gh", *args, "--repo", self.repo],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout
+
+    def issue_labels(self, issue: int) -> list[str]:
+        out = self._gh(
+            "issue", "view", str(issue), "--json", "labels",
+            "--jq", ".labels[].name",
+        )
+        return [line.strip() for line in out.splitlines() if line.strip()]
+
+    def post_issue_comment(self, issue: int, body: str) -> None:
+        self._gh("issue", "comment", str(issue), "--body", body)
+
+    def post_pr_comment(self, pr: int, body: str) -> None:
+        self._gh("pr", "comment", str(pr), "--body", body)
+
+    def add_issue_label(self, issue: int, label: str) -> None:
+        try:
+            self._gh("issue", "edit", str(issue), "--add-label", label)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else "no detail"
+            sys.stderr.write(
+                f"warning: gh issue edit --add-label {label} failed "
+                f"(exit {exc.returncode}): {tail}\n"
+            )
+
+    def add_pr_label(self, pr: int, label: str) -> None:
+        try:
+            self._gh("pr", "edit", str(pr), "--add-label", label)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else "no detail"
+            sys.stderr.write(
+                f"warning: gh pr edit --add-label {label} failed "
+                f"(exit {exc.returncode}): {tail}\n"
+            )
+
+    def issue_comments(self, issue: int) -> list[str]:
+        out = self._gh(
+            "issue", "view", str(issue), "--json", "comments",
+            "--jq", ".comments[].body",
+        )
+        return [line for line in out.splitlines() if line]
+
+    def pr_comments(self, pr: int) -> list[str]:
+        out = self._gh(
+            "pr", "view", str(pr), "--json", "comments",
+            "--jq", ".comments[].body",
+        )
+        return [line for line in out.splitlines() if line]
+
+
+class ShadowIssueClient:
+    """A shadow-mode `IssueClient`: real reads, recorded-but-not-sent writes.
+
+    The SHADOW rollout stage (see `rollout.py`) runs the orchestrator for
+    real — it reads live label sets and drives OpenCode — but posts and
+    labels nothing. Reads delegate to a real `IssueClient`; writes are
+    appended to `issue_comments_posted` / `pr_comments_posted` /
+    `issue_labels_added` / `pr_labels_added` so the composition root can
+    log what *would* have been posted.
+    """
+
+    def __init__(self, reader: IssueClient) -> None:
+        self._reader = reader
+        self.issue_comments_posted: list[tuple[int, str]] = []
+        self.pr_comments_posted: list[tuple[int, str]] = []
+        self.issue_labels_added: list[tuple[int, str]] = []
+        self.pr_labels_added: list[tuple[int, str]] = []
+
+    def issue_labels(self, issue: int) -> list[str]:
+        return self._reader.issue_labels(issue)
+
+    def post_issue_comment(self, issue: int, body: str) -> None:
+        self.issue_comments_posted.append((issue, body))
+
+    def post_pr_comment(self, pr: int, body: str) -> None:
+        self.pr_comments_posted.append((pr, body))
+
+    def add_issue_label(self, issue: int, label: str) -> None:
+        self.issue_labels_added.append((issue, label))
+
+    def add_pr_label(self, pr: int, label: str) -> None:
+        self.pr_labels_added.append((pr, label))
+
+    def issue_comments(self, issue: int) -> list[str]:
+        return self._reader.issue_comments(issue)
+
+    def pr_comments(self, pr: int) -> list[str]:
+        return self._reader.pr_comments(pr)
+
+
+def handle_webhook(
+    event_name: str,
+    payload: dict[str, Any],
+    orchestrator: Orchestrator,
+    github: IssueClient,
+    *,
+    session_store: SessionStore | None = None,
+) -> DraftResult | IterationOutcome | None:
+    """GitHub entry point: map a webhook to an Event and dispatch.
+
+    Reads live labels off the issue before classifying so the orchestrator's
+    classifier can break ties using the *current* labelset, not just whatever
+    the webhook payload happened to carry.
+
+    `session_store` (Tier 2): persistent map from PR number to the OpenCode
+    session that drafted the spec. The Tier-2 refiner needs the same session
+    id the Tier-1 drafter created so context stays warm across reporter
+    comments. SHADOW unit tests can omit it (defaults to an in-memory store).
+    """
+    event = event_from_webhook(event_name, payload)
+    if event is None:
+        return None
+    sessions = session_store or InMemorySessionStore()
+
+    if event.type is EventType.ISSUE_COMMENT:
+        return _handle_issue_comment(event, orchestrator, github, sessions)
+
+    if event.issue is None:
+        return DraftResult(
+            status="skipped",
+            issue=None,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["event missing an issue number"],
+        )
+
+    live_labels = _read_labels(github, event)
+    result = orchestrator.draft_spec(event, live_labels=live_labels)
+    _apply_writes(github, result)
+    # Persist the session id so a later reporter comment on the spec PR can
+    # re-enter the same context-warm OpenCode session.
+    if result.drafted is not None and result.drafted.session_id is not None:
+        sessions.set(event.issue, result.drafted.session_id)
+    return result
+
+
+def _handle_issue_comment(
+    event: Event,
+    orchestrator: Orchestrator,
+    github: IssueClient,
+    sessions: SessionStore,
+) -> IterationOutcome | DraftResult:
+    """Apply a reporter comment through the refiner — the Tier-2 path.
+
+    Looks up the OpenCode session id from the session store; without one
+    (no prior draft) we cannot run `/speckit.clarify`, so we return a
+    skipped DraftResult instead of forcing the refiner into a bad state.
+    """
+    if event.issue is None or not (event.comment or "").strip():
+        return DraftResult(
+            status="skipped",
+            issue=event.issue,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["empty comment / missing issue"],
+        )
+    # Don't iterate on the bot's own comments — that's an infinite loop hazard.
+    actor = (event.actor or "").removesuffix("[bot]")
+    if actor == "spec-generator-bot":
+        return DraftResult(
+            status="skipped",
+            issue=event.issue,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["ignoring own bot comment"],
+        )
+
+    session_id = sessions.get(event.issue)
+    if session_id is None:
+        # No prior draft -> nothing to clarify. Could happen if the agent
+        # was off when the issue opened. Stay silent rather than guess.
+        return DraftResult(
+            status="skipped",
+            issue=event.issue,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["no OpenCode session on record for this issue"],
+        )
+
+    outcome = orchestrator.refine(comment=event.comment or "", session_id=session_id)
+    _apply_iteration_writes(github, event, outcome)
+    return outcome
+
+
+def _read_labels(github: IssueClient, event: Event) -> list[str]:
+    """Read the issue's live labels with a safe payload-based fallback.
+
+    The live read is the source of truth (handles a human labeling AFTER the
+    webhook fired), but a transient `gh` failure — or a smoke-test fixture
+    pointing at an issue that doesn't exist in the live repo — must not crash
+    the run. When the read fails we extract whatever labels the webhook
+    payload itself carried and continue. The classifier still gets *a*
+    labelset; the worst case is a slightly-stale view that the next
+    `issues.labeled` webhook refreshes.
+    """
+    if event.issue is None:
+        return []
+    try:
+        return github.issue_labels(event.issue)
+    except Exception:  # noqa: BLE001
+        issue = (event.raw or {}).get("issue") or {}
+        labels = issue.get("labels") or []
+        return [
+            (item.get("name") or "").strip()
+            for item in labels
+            if isinstance(item, dict) and item.get("name")
+        ]
+
+
+def _apply_writes(github: IssueClient, result: DraftResult) -> None:
+    """Push the orchestrator's recorded comments + labels through the client.
+
+    SHADOW clients record-only; ACT clients hit GitHub. The `target` field
+    decides issue-vs-PR (the spec PR is opened by the workspace push, not
+    handled here in Tier 1).
+    """
+    for target, body in result.comments:
+        if target == "issue" and result.issue is not None:
+            github.post_issue_comment(result.issue, body)
+        elif target == "pr":
+            # Tier 1 has no PR yet — the drafter doesn't push. Skip the PR
+            # comment but keep the record (it stays in `result.comments`).
+            continue
+    for target, label in result.labels:
+        if target == "issue" and result.issue is not None:
+            github.add_issue_label(result.issue, label)
+
+
+def _apply_iteration_writes(
+    github: IssueClient, event: Event, outcome: IterationOutcome
+) -> None:
+    """Push the refiner's recorded comments + labels through the client.
+
+    PR-targeted writes need a PR number — the refiner runs on a comment
+    that may live on the issue *or* on the spec PR. When the event carries
+    a PR (`event.pr`) we write there; otherwise we fall back to the issue
+    so the reporter still sees a reply.
+    """
+    target_pr = event.pr
+    for target, body in outcome.comments:
+        if target == "pr" and target_pr is not None:
+            github.post_pr_comment(target_pr, body)
+        elif event.issue is not None:
+            github.post_issue_comment(event.issue, body)
+    for target, label in outcome.labels:
+        if target == "pr" and target_pr is not None:
+            github.add_pr_label(target_pr, label)
+        elif event.issue is not None:
+            github.add_issue_label(event.issue, label)
+    # Label removal is best-effort and currently unimplemented at the
+    # `gh` boundary — Tier 3 wires `IssueClient.remove_pr_label` /
+    # `remove_issue_label`. The intent is captured in `labels_to_remove`.

@@ -1,0 +1,84 @@
+{
+  "_comment": "Better Stack dashboard config for the Spec Generator (Tier 6, design §11). Import via the Better Stack UI or `betterstack dashboards import`. Source records are the `agent=spec_generator` log lines from `EventLog`.",
+  "name": "Spec Generator",
+  "panels": [
+    {
+      "title": "Drafts per day",
+      "query": "agent:spec_generator event:outcome status:drafted | timeseries 1d",
+      "type": "line"
+    },
+    {
+      "title": "Classification distribution",
+      "query": "agent:spec_generator event:outcome | group_by kind",
+      "type": "pie"
+    },
+    {
+      "title": "Bug repro success rate",
+      "query": "agent:spec_generator event:outcome (drafted OR escalated) kind:bug | success_ratio status:drafted",
+      "type": "single_stat",
+      "unit": "%",
+      "threshold_warn": 50,
+      "threshold_critical": 30
+    },
+    {
+      "title": "Median time issue -> spec PR drafted",
+      "query": "agent:spec_generator event:outcome status:drafted | percentile(duration_ms, 50)",
+      "type": "single_stat",
+      "unit": "ms"
+    },
+    {
+      "title": "Median time spec PR -> intent-confirmed",
+      "query": "agent:spec_generator event:sweep-decision action:confirm | percentile(elapsed_ms, 50)",
+      "type": "single_stat",
+      "unit": "ms"
+    },
+    {
+      "title": "Spend per day (USD)",
+      "query": "agent:spec_generator event:cost-recorded | sum amount_usd | timeseries 1d",
+      "type": "line",
+      "unit": "$"
+    },
+    {
+      "title": "Weekly spend (rolling 7d)",
+      "query": "agent:spec_generator event:cost-recorded | sum amount_usd | rolling 7d",
+      "type": "single_stat",
+      "unit": "$",
+      "threshold_warn": 40,
+      "threshold_critical": 50
+    },
+    {
+      "title": "Refusals — security triage",
+      "query": "agent:spec_generator skip_reason:prompt_injection | timeseries 1d",
+      "type": "bar"
+    },
+    {
+      "title": "Refusals — spend cap",
+      "query": "agent:spec_generator skip_reason:spend_cap_reached | timeseries 1d",
+      "type": "bar"
+    }
+  ],
+  "alerts": [
+    {
+      "name": "spec-generator classifier accuracy below 90%",
+      "_comment": "Wired against a Tier-6 manual-audit sample; see runbook §6.",
+      "query": "agent:spec_generator event:audit-sample | mean accuracy",
+      "condition": "< 0.90",
+      "window_minutes": 1440,
+      "notify": "slack://spec-gen-alerts"
+    },
+    {
+      "name": "spec-generator repro failure rate > 50%",
+      "query": "agent:spec_generator event:outcome kind:bug | failure_ratio outcome:repro_confirmed",
+      "condition": "> 0.5",
+      "window_minutes": 1440,
+      "notify": "slack://spec-gen-alerts"
+    },
+    {
+      "name": "spec-generator weekly spend > 80% of cap",
+      "query": "agent:spec_generator event:cost-recorded | sum amount_usd | rolling 7d",
+      "condition": "> 40",
+      "window_minutes": 60,
+      "notify": "slack://spec-gen-alerts"
+    }
+  ]
+}

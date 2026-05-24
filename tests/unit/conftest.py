@@ -99,6 +99,11 @@ class FakeOpenCodeClient:
     ) -> list[dict[str, Any]]:
         return []
 
+    def close(self) -> None:
+        # Match the real OpenCodeClient lifecycle (called from `finally`
+        # in composition roots). Records the call so tests can assert it.
+        self.call_log.append("close")
+
 
 @pytest.fixture()
 def fake_client() -> FakeOpenCodeClient:
