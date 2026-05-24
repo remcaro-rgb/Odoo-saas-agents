@@ -87,16 +87,42 @@ def test_sensitive_content_beats_a_feature_label():
     assert any("sensitive:" in s for s in result.signals)
 
 
-def test_sensitive_content_in_title_or_body_triggers_match():
+def test_sensitive_detector_does_not_trip_on_password_word_alone():
+    """Refined behaviour: `password` as a feature/bug topic must NOT trip
+    the sensitive detector — that was a false-positive on canary #59 on
+    2026-05-24 where repro steps containing `fill: input[name=password] = admin`
+    were rejected for "containing sensitive content"."""
     result = HeuristicClassifier().classify(
         _intake(
             title="Password broken",
             body="I want to reset my password but the button is missing.",
         )
     )
-    # "password" alone is enough to trip the detector — that's defence in
-    # depth at the cost of some false-positives; the comment is conservative
-    # ("looks like it may contain sensitive content").
+    # Routes to BUG (the "broken"/"missing" keywords win), NOT sensitive.
+    assert result.kind is not IntakeKind.SENSITIVE
+
+
+def test_sensitive_detector_does_not_trip_on_test_default_credentials():
+    """`fill: input[name=password] = admin` is the canonical Odoo-default-
+    creds line in a reproduction; must not be flagged as sensitive."""
+    result = HeuristicClassifier().classify(
+        _intake(
+            title="PDF export 500",
+            body=(
+                "Steps:\n"
+                "1. goto: /web/login\n"
+                "2. fill: input[name=password] = admin\n"
+                "3. click: button[type=submit]"
+            ),
+        )
+    )
+    assert result.kind is not IntakeKind.SENSITIVE
+
+
+def test_sensitive_detector_still_trips_on_real_credentials():
+    """Real credential-shaped values must still trigger SENSITIVE."""
+    body = "Reproducer: my password = Hunter22!secret-passcode-yes\n"
+    result = HeuristicClassifier().classify(_intake(body=body))
     assert result.kind is IntakeKind.SENSITIVE
 
 
