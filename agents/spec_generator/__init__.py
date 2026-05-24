@@ -53,6 +53,16 @@ from .github_io import (
 )
 from .intake import Intake, IntakeBuilder
 from .pushback import push_spec
+from .refiner import (
+    AWAITING_CONFIRM_LABEL,
+    AWAITING_RECONFIRM_LABEL,
+    INTENT_CONFIRMED_LABEL,
+    CommentClassifier,
+    CommentIntent,
+    HeuristicCommentClassifier,
+    IterationOutcome,
+    Refiner,
+)
 from .run_store import (
     PHASE_AWAITING_REPORTER_CONFIRM,
     PHASE_COMPLETED,
@@ -68,16 +78,6 @@ from .run_store import (
     PostgresRunStore,
     RunStore,
     build_run_store,
-)
-from .refiner import (
-    AWAITING_CONFIRM_LABEL,
-    AWAITING_RECONFIRM_LABEL,
-    INTENT_CONFIRMED_LABEL,
-    CommentClassifier,
-    CommentIntent,
-    HeuristicCommentClassifier,
-    IterationOutcome,
-    Refiner,
 )
 from .session_store import (
     InMemorySessionStore,
