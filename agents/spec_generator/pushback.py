@@ -226,13 +226,17 @@ def push_spec(
             # Treat undecodable content as "different" and proceed with update.
             pass
 
-    # 3. PUT the file. GitHub creates the branch if missing (off base_branch)
-    # and produces a verified-signature commit because the actor is the App.
+    # 3. PUT the file. GitHub auto-signs the commit ONLY when committer/author
+    # are derived from the App token — passing an explicit `committer` block
+    # (even with the bot's canonical noreply email) flips `verification.verified`
+    # to false and the `required_signatures` ruleset rejects the push with 409.
+    # Verified live 2026-05-24 against the spec-generator-bot installation:
+    # - PUT without `committer` -> verified: true, reason: valid
+    # - PUT with  `committer`   -> verified: false, reason: unsigned
     put_body: dict[str, Any] = {
         "message": f"Spec Generator — draft spec for issue #{issue}",
         "content": base64.b64encode(spec_body.encode("utf-8")).decode("ascii"),
         "branch": branch,
-        "committer": {"name": BOT_NAME, "email": _bot_email(app_id)},
     }
     if existing_sha:
         put_body["sha"] = existing_sha

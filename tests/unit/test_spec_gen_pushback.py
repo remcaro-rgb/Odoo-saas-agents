@@ -133,7 +133,8 @@ def test_act_creates_file_via_contents_api_and_opens_pr(fake_gh):
     assert put_body["branch"] == "agent/spec-0001-x"
     decoded = base64.b64decode(put_body["content"]).decode("utf-8")
     assert decoded == "# Spec body\n\nSome content.\n"
-    assert put_body["committer"]["email"].startswith("999+spec-generator-bot[bot]@")
+    # Must NOT include an explicit committer — that flips off auto-sign.
+    assert "committer" not in put_body
     # Log shows the verified commit + PR.
     assert any(r["event"] == "branch-created" for r in log.records)
     assert any(r["event"] == "committed-spec" and r.get("verified") for r in log.records)
