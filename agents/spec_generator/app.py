@@ -36,6 +36,7 @@ from agents.implementation.observability import EventLog
 from agents.implementation.opencode_client import DEFAULT_BASE_URL, OpenCodeClient
 from agents.implementation.rollout import Rollout, RolloutDecision
 
+from .axiom_sink import maybe_build_axiom_sink
 from .core import DraftResult, Orchestrator
 from .github_io import (
     GhCliIssueClient,
@@ -221,7 +222,16 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
     # via its module-global; we override it here so spec-gen records are
     # distinguishable. (A future shared package would make this a constructor
     # arg — for Tier 1 the in-place override is fine.)
-    log = log or EventLog(run_id=env.get("GITHUB_RUN_ID"))
+    #
+    # Observability sink: stdout always, plus Axiom when AXIOM_TOKEN +
+    # AXIOM_DATASET env vars are set. Unset = stdout-only. The composite
+    # sink is the same shape `EventLog` already expects; Axiom flushes at
+    # the end of the run.
+    axiom_sink = maybe_build_axiom_sink(env)
+    log = log or EventLog(
+        run_id=env.get("GITHUB_RUN_ID"),
+        sink=axiom_sink,
+    )
     _tag_spec_generator(log)
 
     loaded = load_event(env)
@@ -295,6 +305,15 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         result if isinstance(result, DraftResult) else None,
         anchor=_extract_pr_or_issue(payload),
     )
+
+    # Flush the Axiom buffer last — after all the run's records are emitted.
+    # Failures are best-effort (logged to stderr by the sink itself); the
+    # stdout audit trail is the authoritative copy regardless.
+    sink = getattr(log, "_sink", None)
+    axiom = getattr(sink, "axiom", None)
+    if axiom is not None:
+        axiom.flush()
+
     return 0
 
 
