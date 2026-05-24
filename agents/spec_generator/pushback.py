@@ -60,12 +60,14 @@ def _gh_request(
     token: str,
     body: dict[str, Any] | None = None,
     accept_404: bool = False,
+    accept_422: bool = False,
 ) -> _GhResponse:
     """Authed GitHub REST call. Returns parsed JSON + status.
 
     ``accept_404`` makes a missing resource (typically a file that doesn't
     exist yet on the branch) a non-error response so the caller can branch
-    on ``status``.
+    on ``status``. ``accept_422`` makes "already exists" (the idempotent
+    case for `POST /git/refs` against an existing branch) a non-error.
     """
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(
@@ -92,6 +94,8 @@ def _gh_request(
         raw = exc.read()
         if exc.code == 404 and accept_404:
             return _GhResponse(status=404, body=None, raw=raw)
+        if exc.code == 422 and accept_422:
+            return _GhResponse(status=422, body=None, raw=raw)
         body_text = raw.decode("utf-8", errors="replace")[:500]
         raise RuntimeError(
             f"GitHub {method} {path} -> HTTP {exc.code}: {body_text}"
@@ -154,6 +158,23 @@ def push_spec(
         raise RuntimeError(
             f"cannot resolve base branch {base_branch} on {repo}"
         )
+
+    # 1b. Ensure the agent branch exists. `PUT /contents` does NOT auto-create
+    # the branch (despite what the docs suggest); a missing branch returns
+    # 404. We always try `POST /git/refs` — a 422 "Reference already exists"
+    # is the idempotent success case and is swallowed via `accept_422`.
+    create_ref = _gh_request(
+        "POST",
+        f"/repos/{repo}/git/refs",
+        token=token,
+        body={"ref": f"refs/heads/{branch}", "sha": base_sha},
+        accept_404=False,
+        accept_422=True,
+    )
+    if create_ref.status == 201:
+        log.emit("branch-created", branch=branch, base_sha=base_sha[:8])
+    elif create_ref.status == 422:
+        log.emit("branch-exists", branch=branch)
 
     # 2. Check whether the file already exists on the agent branch (returns
     # the blob SHA needed for an UPDATE).

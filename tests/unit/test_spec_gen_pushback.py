@@ -89,6 +89,8 @@ def test_act_creates_file_via_contents_api_and_opens_pr(fake_gh):
     calls, script = fake_gh
     # 1) GET /repos/o/r/branches/main -> base sha
     script.append(_FakeResp(200, {"commit": {"sha": "basesha123456"}}))
+    # 1b) POST /repos/o/r/git/refs -> branch created (201)
+    script.append(_FakeResp(201, {"ref": "refs/heads/agent/spec-0001-x"}))
     # 2) GET contents -> 404 (file doesn't exist yet)
     script.append(HTTPError("u", 404, "missing", {}, io.BytesIO(b"{}")))
     # 3) PUT contents -> commit landed (server-signed)
@@ -114,27 +116,66 @@ def test_act_creates_file_via_contents_api_and_opens_pr(fake_gh):
         app_id="999",
     )
     assert pr == 42
-    # 5 HTTP calls in the expected order.
+    # 6 HTTP calls in the expected order — note the new POST /git/refs.
     methods = [(c["method"], c["url"].split("/repos/o/r")[1].split("?")[0]) for c in calls]
     assert methods[0] == ("GET", "/branches/main")
-    assert methods[1] == ("GET", "/contents/docs/superpowers/specs/0001-x-design.md")
-    assert methods[2] == ("PUT", "/contents/docs/superpowers/specs/0001-x-design.md")
-    assert methods[3] == ("GET", "/pulls")
-    assert methods[4] == ("POST", "/pulls")
+    assert methods[1] == ("POST", "/git/refs")
+    assert methods[2] == ("GET", "/contents/docs/superpowers/specs/0001-x-design.md")
+    assert methods[3] == ("PUT", "/contents/docs/superpowers/specs/0001-x-design.md")
+    assert methods[4] == ("GET", "/pulls")
+    assert methods[5] == ("POST", "/pulls")
+    # POST /git/refs body references the agent branch off base sha.
+    refs_body = calls[1]["body"]
+    assert refs_body["ref"] == "refs/heads/agent/spec-0001-x"
+    assert refs_body["sha"] == "basesha123456"
     # PUT body has base64-encoded content + branch + committer.
-    put_body = calls[2]["body"]
+    put_body = calls[3]["body"]
     assert put_body["branch"] == "agent/spec-0001-x"
     decoded = base64.b64decode(put_body["content"]).decode("utf-8")
     assert decoded == "# Spec body\n\nSome content.\n"
     assert put_body["committer"]["email"].startswith("999+spec-generator-bot[bot]@")
     # Log shows the verified commit + PR.
+    assert any(r["event"] == "branch-created" for r in log.records)
     assert any(r["event"] == "committed-spec" and r.get("verified") for r in log.records)
     assert any(r["event"] == "pr-created" and r.get("pr") == 42 for r in log.records)
+
+
+def test_act_tolerates_branch_already_exists(fake_gh):
+    """422 on POST /git/refs is the idempotent case for a re-run."""
+    calls, script = fake_gh
+    script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    # POST /git/refs -> 422 because the branch already exists from prior run
+    script.append(HTTPError("u", 422, "Reference already exists", {}, io.BytesIO(b"{}")))
+    # GET contents -> 200 + same content (idempotent path)
+    spec_body = "# spec body"
+    script.append(_FakeResp(200, {
+        "sha": "blobsha",
+        "content": base64.b64encode(spec_body.encode("utf-8")).decode("ascii"),
+    }))
+    # GET pulls -> existing PR
+    script.append(_FakeResp(200, [{"number": 5}]))
+
+    log = EventLog()
+    pr = push_spec(
+        workspace_root="/tmp/x",
+        spec_path="docs/specs/x-design.md",
+        spec_body=spec_body,
+        branch="agent/spec-0001-x",
+        push_url="https://x-access-token:tk@github.com/o/r.git",
+        issue=1,
+        title="x",
+        decision=RolloutDecision.ACT,
+        log=log,
+    )
+    assert pr == 5
+    assert any(r["event"] == "branch-exists" for r in log.records)
 
 
 def test_act_updates_existing_file_with_blob_sha(fake_gh):
     calls, script = fake_gh
     script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    # POST /git/refs -> branch already exists (422)
+    script.append(HTTPError("u", 422, "exists", {}, io.BytesIO(b"{}")))
     # File exists -> 200 + blob SHA + base64 content.
     script.append(_FakeResp(200, {
         "sha": "blobsha789",
@@ -157,13 +198,16 @@ def test_act_updates_existing_file_with_blob_sha(fake_gh):
         log=log,
     )
     # PUT body included the blob SHA (the API requires it for updates).
-    assert calls[2]["body"]["sha"] == "blobsha789"
+    # Index 3 because: 0=GET branches, 1=POST refs, 2=GET contents, 3=PUT contents
+    assert calls[3]["body"]["sha"] == "blobsha789"
 
 
 def test_act_idempotent_when_existing_content_matches(fake_gh):
     calls, script = fake_gh
     spec_body = "# spec body"
     script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    # POST /git/refs -> 422 (branch already exists)
+    script.append(HTTPError("u", 422, "exists", {}, io.BytesIO(b"{}")))
     # Existing file content matches what we'd write — no commit, just find/open PR.
     script.append(_FakeResp(200, {
         "sha": "blobsha",
@@ -194,6 +238,7 @@ def test_act_idempotent_when_existing_content_matches(fake_gh):
 def test_act_returns_existing_pr_when_one_is_already_open(fake_gh):
     calls, script = fake_gh
     script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    script.append(_FakeResp(201, {"ref": "refs/heads/agent/spec-0001-x"}))  # new branch
     script.append(HTTPError("u", 404, "missing", {}, io.BytesIO(b"{}")))
     script.append(_FakeResp(201, {"commit": {"sha": "newsha"}}))
     script.append(_FakeResp(200, [{"number": 99}]))  # one open PR
