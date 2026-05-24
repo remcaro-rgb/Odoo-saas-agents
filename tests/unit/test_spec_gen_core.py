@@ -83,13 +83,16 @@ def test_sensitive_intake_does_not_call_opencode(fake_client):
     assert "needs-security-triage" in label_names
 
 
-def test_bug_intake_is_deferred_to_tier_4_without_drafting(fake_client):
-    orch = Orchestrator(oc_client=fake_client)
+def test_bug_intake_without_agentlab_falls_back_to_human_triage(fake_client):
+    """Tier 4 ships an AgentlabClient; without one the orchestrator routes
+    bugs to human triage (the pre-Tier-4 posture)."""
+    orch = Orchestrator(oc_client=fake_client)  # no agentlab
     result = orch.draft_spec(_evt(kind_hint="bug", body="It crashes."))
     assert result.status == "escalated"
     assert result.skip_reason is SkipReason.UNSUPPORTED_KIND
     assert fake_client.commands == []
-    assert any("Tier 4" in body for _, body in result.comments)
+    label_names = [name for _, name in result.labels]
+    assert "needs-human" in label_names
 
 
 def test_config_intake_routes_to_support(fake_client):

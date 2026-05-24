@@ -15,5 +15,12 @@ venv/
 opencode-data/
 *.db
 
+# Spec Generator runtime state (Tier 2 JsonFileSessionStore default path)
+.spec-generator-sessions.json
+.agent-events/
+
+# Local venvs created by ad-hoc runs
+.venv-spec-gen/
+
 # OS
 .DS_Store

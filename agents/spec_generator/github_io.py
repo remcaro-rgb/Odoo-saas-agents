@@ -24,6 +24,8 @@ from typing import Any, Protocol, runtime_checkable
 from .core import DraftResult, Orchestrator, SkipReason
 from .events import Event, EventType
 from .github_adapter import event_from_webhook
+from .refiner import IterationOutcome
+from .session_store import InMemorySessionStore, SessionStore
 
 
 @runtime_checkable
@@ -205,26 +207,27 @@ def handle_webhook(
     payload: dict[str, Any],
     orchestrator: Orchestrator,
     github: IssueClient,
-) -> DraftResult | None:
+    *,
+    session_store: SessionStore | None = None,
+) -> DraftResult | IterationOutcome | None:
     """GitHub entry point: map a webhook to an Event and dispatch.
 
     Reads live labels off the issue before classifying so the orchestrator's
     classifier can break ties using the *current* labelset, not just whatever
     the webhook payload happened to carry.
+
+    `session_store` (Tier 2): persistent map from PR number to the OpenCode
+    session that drafted the spec. The Tier-2 refiner needs the same session
+    id the Tier-1 drafter created so context stays warm across reporter
+    comments. SHADOW unit tests can omit it (defaults to an in-memory store).
     """
     event = event_from_webhook(event_name, payload)
     if event is None:
         return None
+    sessions = session_store or InMemorySessionStore()
 
     if event.type is EventType.ISSUE_COMMENT:
-        # Reporter Q&A ships in Tier 2 (`refiner.py`). For Tier 1 we record
-        # the skip so observability captures every webhook we saw.
-        return DraftResult(
-            status="skipped",
-            issue=event.issue,
-            skip_reason=SkipReason.NOT_A_TRIGGER,
-            notes=["issue_comment routing reserved for Tier 2 (refiner.py)"],
-        )
+        return _handle_issue_comment(event, orchestrator, github, sessions)
 
     if event.issue is None:
         return DraftResult(
@@ -237,7 +240,56 @@ def handle_webhook(
     live_labels = _read_labels(github, event)
     result = orchestrator.draft_spec(event, live_labels=live_labels)
     _apply_writes(github, result)
+    # Persist the session id so a later reporter comment on the spec PR can
+    # re-enter the same context-warm OpenCode session.
+    if result.drafted is not None and result.drafted.session_id is not None:
+        sessions.set(event.issue, result.drafted.session_id)
     return result
+
+
+def _handle_issue_comment(
+    event: Event,
+    orchestrator: Orchestrator,
+    github: IssueClient,
+    sessions: SessionStore,
+) -> IterationOutcome | DraftResult:
+    """Apply a reporter comment through the refiner — the Tier-2 path.
+
+    Looks up the OpenCode session id from the session store; without one
+    (no prior draft) we cannot run `/speckit.clarify`, so we return a
+    skipped DraftResult instead of forcing the refiner into a bad state.
+    """
+    if event.issue is None or not (event.comment or "").strip():
+        return DraftResult(
+            status="skipped",
+            issue=event.issue,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["empty comment / missing issue"],
+        )
+    # Don't iterate on the bot's own comments — that's an infinite loop hazard.
+    actor = (event.actor or "").removesuffix("[bot]")
+    if actor == "spec-generator-bot":
+        return DraftResult(
+            status="skipped",
+            issue=event.issue,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["ignoring own bot comment"],
+        )
+
+    session_id = sessions.get(event.issue)
+    if session_id is None:
+        # No prior draft -> nothing to clarify. Could happen if the agent
+        # was off when the issue opened. Stay silent rather than guess.
+        return DraftResult(
+            status="skipped",
+            issue=event.issue,
+            skip_reason=SkipReason.NOT_A_TRIGGER,
+            notes=["no OpenCode session on record for this issue"],
+        )
+
+    outcome = orchestrator.refine(comment=event.comment or "", session_id=session_id)
+    _apply_iteration_writes(github, event, outcome)
+    return outcome
 
 
 def _read_labels(github: IssueClient, event: Event) -> list[str]:
@@ -282,3 +334,29 @@ def _apply_writes(github: IssueClient, result: DraftResult) -> None:
     for target, label in result.labels:
         if target == "issue" and result.issue is not None:
             github.add_issue_label(result.issue, label)
+
+
+def _apply_iteration_writes(
+    github: IssueClient, event: Event, outcome: IterationOutcome
+) -> None:
+    """Push the refiner's recorded comments + labels through the client.
+
+    PR-targeted writes need a PR number — the refiner runs on a comment
+    that may live on the issue *or* on the spec PR. When the event carries
+    a PR (`event.pr`) we write there; otherwise we fall back to the issue
+    so the reporter still sees a reply.
+    """
+    target_pr = event.pr
+    for target, body in outcome.comments:
+        if target == "pr" and target_pr is not None:
+            github.post_pr_comment(target_pr, body)
+        elif event.issue is not None:
+            github.post_issue_comment(event.issue, body)
+    for target, label in outcome.labels:
+        if target == "pr" and target_pr is not None:
+            github.add_pr_label(target_pr, label)
+        elif event.issue is not None:
+            github.add_issue_label(event.issue, label)
+    # Label removal is best-effort and currently unimplemented at the
+    # `gh` boundary — Tier 3 wires `IssueClient.remove_pr_label` /
+    # `remove_issue_label`. The intent is captured in `labels_to_remove`.

@@ -24,8 +24,9 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  issues: read  # SHADOW reads labels off the issue but writes nothing
+  contents: write   # push the spec branch (Tier 2 ACT)
+  issues: write     # post the summary comment + add labels (Tier 2 ACT)
+  pull-requests: write  # open the spec PR (Tier 2 ACT)
 
 jobs:
   draft:
@@ -56,12 +57,15 @@ jobs:
         # observability, notifier).
         run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
 
-      # Tier 1 SHADOW: no bot token minted yet. Tier 2 adds:
-      #   - name: Mint a token for the spec-generator-bot GitHub App
-      #     uses: actions/create-github-app-token@v1
-      #     with:
-      #       app-id: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
-      #       private-key: ${{ secrets.SPEC_GENERATOR_BOT_PRIVATE_KEY }}
+      - name: Mint a token for the spec-generator-bot GitHub App
+        id: bot_token
+        # The App is optional in SHADOW (no writes) — only mint when the
+        # variable is present so SHADOW-only deployments don't fail.
+        if: ${{ vars.SPEC_GENERATOR_BOT_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          private-key: ${{ secrets.SPEC_GENERATOR_BOT_PRIVATE_KEY }}
 
       - name: Run the agent (SHADOW mode default)
         env:
@@ -77,5 +81,6 @@ jobs:
           ROLLOUT_FIXTURES: ${{ vars.SPEC_GEN_ROLLOUT_FIXTURES }}
           ROLLOUT_OPT_IN: ${{ vars.SPEC_GEN_ROLLOUT_OPT_IN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # Tier 2: SPEC_GENERATOR_BOT_APP_ID + GH_TOKEN (commented above)
+          SPEC_GENERATOR_BOT_APP_ID: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token }}
         run: python -m agents.spec_generator

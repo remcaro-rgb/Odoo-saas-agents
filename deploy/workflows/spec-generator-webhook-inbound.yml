@@ -1,0 +1,76 @@
+# Spec Generator — chatbot webhook intake (Tier 5).
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/`.
+# INERT in this repo (not under `.github/`).
+#
+# Fires when the chatbot gateway dispatches a `repository_dispatch` event of
+# type `spec-generator-chatbot-intake`. The gateway has already mirrored the
+# conversation as a real GitHub issue and verified the HMAC; this workflow
+# loads the inbound payload and routes it through the orchestrator's normal
+# draft path with `source:chatbot` preserved.
+name: Spec Generator - chatbot intake
+
+on:
+  repository_dispatch:
+    types: [spec-generator-chatbot-intake]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: spec-gen-chatbot-${{ github.event.client_payload.conversation_id }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the data-plane repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Spec Generator
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
+
+      - name: Mint a token for the spec-generator-bot GitHub App
+        id: bot_token
+        if: ${{ vars.SPEC_GENERATOR_BOT_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          private-key: ${{ secrets.SPEC_GENERATOR_BOT_PRIVATE_KEY }}
+
+      - name: Write the chatbot payload to disk
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          mkdir -p .agent-events
+          # The gateway has already pre-shaped the payload into an
+          # `issues.opened` skeleton; we just write it out for the
+          # orchestrator's normal event loader.
+          echo "$PAYLOAD" > .agent-events/chatbot.json
+
+      - name: Run the agent
+        env:
+          GITHUB_EVENT_NAME: issues
+          GITHUB_EVENT_PATH: .agent-events/chatbot.json
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
+          OPENCODE_SERVER_PASSWORD: ${{ secrets.OPENCODE_SERVER_PASSWORD }}
+          DATA_PLANE_REPO: ${{ github.repository }}
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          ROLLOUT_STAGE: ${{ vars.SPEC_GEN_ROLLOUT_STAGE || 'shadow' }}
+          ROLLOUT_FIXTURES: ${{ vars.SPEC_GEN_ROLLOUT_FIXTURES }}
+          ROLLOUT_OPT_IN: ${{ vars.SPEC_GEN_ROLLOUT_OPT_IN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SPEC_GENERATOR_BOT_APP_ID: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token }}
+        run: python -m agents.spec_generator

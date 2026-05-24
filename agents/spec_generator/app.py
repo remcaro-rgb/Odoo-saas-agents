@@ -43,6 +43,8 @@ from .github_io import (
     ShadowIssueClient,
     handle_webhook,
 )
+from .pushback import push_spec
+from .session_store import JsonFileSessionStore, SessionStore
 
 # `EventLog` tags every record with its `agent` field — overridden via the
 # module global in `observability`. We set it here so spec-gen records are
@@ -248,12 +250,16 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         return 1
 
     client = build_opencode_client(config)
-    result: DraftResult | None = None
+    result: DraftResult | Any | None = None
     try:
         orchestrator = build_orchestrator(config, client, decision=decision)
         github = build_github(config.data_plane_repo, decision)
-        result = handle_webhook(event_name, payload, orchestrator, github)
-        if result is not None:
+        sessions = build_session_store(config)
+        result = handle_webhook(
+            event_name, payload, orchestrator, github,
+            session_store=sessions,
+        )
+        if isinstance(result, DraftResult):
             log.emit(
                 "outcome",
                 status=result.status,
@@ -261,6 +267,17 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
                 skip_reason=(
                     result.skip_reason.value if result.skip_reason is not None else None
                 ),
+                shadow=decision is RolloutDecision.SHADOW,
+            )
+            for note in result.notes:
+                log.emit("note", text=note)
+            # Tier 2 push-back: write the spec, push the branch, open the PR.
+            _maybe_push_spec(config, decision, result, log)
+        elif result is not None:
+            log.emit(
+                "iteration",
+                intent=getattr(result.intent, "value", str(result.intent)),
+                status=result.status,
                 shadow=decision is RolloutDecision.SHADOW,
             )
             for note in result.notes:
@@ -275,7 +292,7 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
 
     notify_outcome(
         build_notifier(config, decision),
-        result,
+        result if isinstance(result, DraftResult) else None,
         anchor=_extract_pr_or_issue(payload),
     )
     return 0
@@ -296,6 +313,70 @@ def _tag_spec_generator(log: EventLog) -> None:
         return original_emit(event, **fields)
 
     log.emit = emit_with_agent_override  # type: ignore[method-assign]
+
+
+def build_session_store(config: AgentConfig) -> SessionStore:
+    """The persistence layer for PR -> OpenCode-session-id (Tier 2).
+
+    Lives at ``<workspace>/.spec-generator-sessions.json``. Checking the
+    file into the repo is acceptable for low-volume Tier 2; Tier 3 swaps
+    in a Postgres-backed `spec_generator_runs` store without changing this
+    function's signature.
+    """
+    path = os.path.join(config.workspace_root, ".spec-generator-sessions.json")
+    return JsonFileSessionStore(path)
+
+
+def _maybe_push_spec(
+    config: AgentConfig,
+    decision: RolloutDecision,
+    result: DraftResult,
+    log: EventLog,
+) -> None:
+    """Push the drafted spec + open the PR — Tier 2's ACT path.
+
+    A no-op unless:
+      - The drafter produced a non-empty body.
+      - The agent has a bot token (Tier 2 GitHub App provisioned).
+      - The rollout decision is ACT.
+
+    SHADOW is handled inside ``push_spec`` itself (it logs the shadow-push
+    intent and returns), so a SHADOW run still emits the audit record.
+    """
+    if result.drafted is None or not result.drafted.body.strip():
+        return
+    if not (config.bot_token and config.data_plane_repo):
+        log.emit(
+            "push-skipped",
+            reason="no bot token — Tier 2 App not provisioned yet",
+        )
+        return
+    push_url = (
+        f"https://x-access-token:{config.bot_token}"
+        f"@github.com/{config.data_plane_repo}.git"
+    )
+    push_spec(
+        workspace_root=config.workspace_root,
+        spec_path=result.drafted.path,
+        spec_body=result.drafted.body,
+        branch=result.drafted.branch,
+        push_url=push_url,
+        issue=result.drafted.issue,
+        title=_intake_title_from_result(result),
+        decision=decision,
+        log=log,
+        app_id=config.app_id,
+    )
+
+
+def _intake_title_from_result(result: DraftResult) -> str:
+    """Best-effort title for the PR — falls back to a generic if unknown."""
+    if result.drafted is None:
+        return f"draft spec for issue #{result.issue}"
+    # The drafter's `path` ends with `<slug>-design.md`; the slug captures
+    # the title well enough for a PR title without re-threading the intake.
+    name = result.drafted.path.rsplit("/", 1)[-1]
+    return name.removesuffix("-design.md").replace("-", " ")
 
 
 def main() -> int:

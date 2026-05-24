@@ -52,26 +52,53 @@ from .github_io import (
     handle_webhook,
 )
 from .intake import Intake, IntakeBuilder
+from .pushback import push_spec
+from .refiner import (
+    AWAITING_CONFIRM_LABEL,
+    AWAITING_RECONFIRM_LABEL,
+    INTENT_CONFIRMED_LABEL,
+    CommentClassifier,
+    CommentIntent,
+    HeuristicCommentClassifier,
+    IterationOutcome,
+    Refiner,
+)
+from .session_store import (
+    InMemorySessionStore,
+    JsonFileSessionStore,
+    SessionStore,
+)
 from .speckit_driver import SpecKitFrontDriver
 
 __all__ = [
     "AGENT_MARKER",
+    "AWAITING_CONFIRM_LABEL",
+    "AWAITING_RECONFIRM_LABEL",
     "AgentConfig",
     "Classifier",
+    "CommentClassifier",
+    "CommentIntent",
+    "DraftResult",
     "DraftedSpec",
     "Drafter",
-    "DraftResult",
     "Event",
     "EventType",
     "FakeIssueClient",
     "GhCliIssueClient",
     "HeuristicClassifier",
+    "HeuristicCommentClassifier",
+    "INTENT_CONFIRMED_LABEL",
+    "InMemorySessionStore",
     "Intake",
     "IntakeBuilder",
     "IntakeKind",
     "IssueClient",
+    "IterationOutcome",
+    "JsonFileSessionStore",
     "KindResult",
     "Orchestrator",
+    "Refiner",
+    "SessionStore",
     "ShadowIssueClient",
     "SkipReason",
     "SpecKitFrontDriver",
@@ -80,6 +107,7 @@ __all__ = [
     "feature_name",
     "handle_webhook",
     "main",
+    "push_spec",
     "run",
     "sensitive_escalation_notice",
     "spec_drafted",

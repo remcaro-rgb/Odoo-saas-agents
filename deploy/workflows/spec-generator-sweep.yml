@@ -1,0 +1,86 @@
+# Spec Generator Agent — auto-confirm sweep (Tier 3, cron).
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/`.
+# INERT in this repo (not under `.github/`).
+#
+# Walks open spec PRs in the `awaiting-reporter-confirm` label state, finds
+# the ones whose spec file hasn't been touched in 24h and has zero
+# `[NEEDS CLARIFICATION]` markers, applies `intent-confirmed`, and posts
+# the 7-day `/reopen` window comment.
+name: Spec Generator - sweep
+
+on:
+  schedule:
+    # 09:00 UTC daily — quiet hour in the US/EU overlap.
+    - cron: "0 9 * * *"
+  # On-demand for incident-response & smoke tests.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute decisions but post no comments and add no labels"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: read
+  pull-requests: write  # Tier 3 sweep applies intent-confirmed + posts comment
+
+concurrency:
+  group: spec-gen-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Spec Generator
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}"
+
+      - name: Mint a token for the spec-generator-bot GitHub App
+        id: bot_token
+        if: ${{ vars.SPEC_GENERATOR_BOT_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SPEC_GENERATOR_BOT_APP_ID }}
+          private-key: ${{ secrets.SPEC_GENERATOR_BOT_PRIVATE_KEY }}
+
+      - name: Run the sweep
+        env:
+          DATA_PLANE_REPO: ${{ github.repository }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          ROLLOUT_STAGE: ${{ vars.SPEC_GEN_ROLLOUT_STAGE || 'shadow' }}
+          SWEEP_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          GH_TOKEN: ${{ steps.bot_token.outputs.token || github.token }}
+        # SHADOW + dry_run both produce a no-side-effect dry-run. ACT with
+        # dry_run=false is the live sweep.
+        run: |
+          python -c "
+          import os
+          from agents.spec_generator.sweep import GhCliSweepClient, run_sweep
+          from agents.implementation.observability import EventLog
+          from agents.implementation.rollout import Rollout, RolloutDecision
+
+          log = EventLog(run_id=os.environ.get('GITHUB_RUN_ID'))
+          rollout = Rollout.from_env(os.environ)
+          if rollout.decide('sweep') is RolloutDecision.SKIP:
+              log.emit('skipped', reason='rollout gate decided SKIP')
+              raise SystemExit(0)
+          act = (
+              rollout.decide('sweep') is RolloutDecision.ACT
+              and os.environ.get('SWEEP_DRY_RUN', 'false').lower() != 'true'
+          )
+          client = GhCliSweepClient(os.environ['DATA_PLANE_REPO'])
+          result = run_sweep(client=client, act=act)
+          for d in result.decisions:
+              log.emit('sweep-decision', pr=d.pr, branch=d.branch,
+                       spec_path=d.spec_path, action=d.action, reason=d.reason)
+          log.emit('sweep-summary', confirmed=len(result.confirmed),
+                   total=len(result.decisions), act=act)
+          "

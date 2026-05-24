@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 
 from .intake import Intake
+from .repro import ReproResult
 from .speckit_driver import SpecifyResult, SpecKitFrontDriver
 
 # A safe slug for a spec filename: lowercase letters / digits / hyphens, no
@@ -40,6 +41,54 @@ class DraftedSpec:
     session_id: str | None
 
 
+def _render_fix_brief(intake: Intake, repro: ReproResult) -> str:
+    """Render the fix-brief markdown body.
+
+    Matches the shape of `docs/superpowers/specs/_TEMPLATE-fix.md` (which
+    the Implementation Agent's `/speckit.fix` already drives against). The
+    template is deliberately minimal — the Implementation Agent fills in
+    the actual fix; the Spec Generator's job is to package the *bug
+    context* (steps, expected, actual, attachments, repro logs) cleanly.
+    """
+    parts: list[str] = [
+        f"# Fix-brief — {intake.title or '(untitled bug)'}",
+        "",
+        f"_From GitHub Issue #{intake.issue} (reporter: {intake.reporter})._",
+        "",
+        "## Repro outcome",
+        f"- **Status:** `{repro.outcome.value}`",
+    ]
+    if repro.summary:
+        parts.append(f"- **Summary:** {repro.summary}")
+    if repro.screenshots:
+        parts.append("- **Screenshots:**")
+        parts += [f"  - {url}" for url in repro.screenshots]
+    parts += ["", "## Issue body", "", intake.body.strip() or "(empty)"]
+    if intake.attachments:
+        parts += ["", "## Reporter attachments"]
+        parts += [f"- {url}" for url in intake.attachments]
+    if repro.logs:
+        # Trim the tail to keep the brief readable — 2 KB is plenty for the
+        # Implementation Agent to pattern-match on.
+        tail = repro.logs[-2000:]
+        parts += [
+            "",
+            "## Playwright log tail",
+            "",
+            "```",
+            tail.rstrip(),
+            "```",
+        ]
+    parts += [
+        "",
+        "## Acceptance",
+        "- The reproduction steps no longer trigger the symptom.",
+        "- A regression test pins the fix.",
+        "",
+    ]
+    return "\n".join(parts) + "\n"
+
+
 def _slug(text: str, *, limit: int = 40) -> str:
     """Slugify `text` for a branch / filename. Falls back to `"spec"` for empty."""
     lowered = (text or "").lower()
@@ -57,6 +106,11 @@ def feature_branch(issue: int, title: str) -> str:
 def spec_path(issue: int, title: str) -> str:
     """Repo-relative path the design spec is written to."""
     return f"docs/superpowers/specs/spec-{issue:04d}-{_slug(title)}-design.md"
+
+
+def fix_brief_path(issue: int, title: str) -> str:
+    """Repo-relative path the fix-brief is written to (Tier 4)."""
+    return f"docs/superpowers/specs/fix-{issue:04d}-{_slug(title)}-fix.md"
 
 
 class Drafter:
@@ -118,6 +172,38 @@ class Drafter:
             lines += ["", "Attachments referenced:"]
             lines += [f"- {url}" for url in intake.attachments]
         return "\n".join(lines)
+
+    def draft_fix_brief(
+        self,
+        *,
+        intake: Intake,
+        repro: ReproResult,
+    ) -> DraftedSpec:
+        """Deterministic fix-brief template fill-in for a confirmed bug (Tier 4).
+
+        Unlike the design-spec path, fix-briefs do NOT call `/speckit.specify`
+        — the structure is opinionated enough that a template + LLM fill-in
+        would just be an expensive copy of the same content. The
+        Implementation Agent then drives `/speckit.fix` against this brief.
+        """
+        body = _render_fix_brief(intake, repro)
+        captured: tuple[str, ...] = (
+            f"issue #{intake.issue} — {intake.title or '(untitled)'}",
+            f"reproduction: {repro.outcome.value}",
+        )
+        if repro.screenshots:
+            captured = captured + (
+                f"{len(repro.screenshots)} screenshot(s) captured by Playwright",
+            )
+        return DraftedSpec(
+            issue=intake.issue,
+            branch=feature_branch(intake.issue, intake.title),
+            path=fix_brief_path(intake.issue, intake.title),
+            body=body,
+            captured_items=captured,
+            open_questions=(),
+            session_id=None,
+        )
 
     @staticmethod
     def _summarize_captured(

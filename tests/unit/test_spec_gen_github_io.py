@@ -81,7 +81,8 @@ def test_handle_webhook_drafts_for_a_feature_request(fake_client):
     assert "awaiting-reporter-confirm" in label_names
 
 
-def test_handle_webhook_issue_comment_is_a_tier_2_skip(fake_client):
+def test_handle_webhook_issue_comment_with_no_session_is_skipped(fake_client):
+    """A reporter comment on an issue with no prior draft has nothing to clarify."""
     orch = Orchestrator(oc_client=fake_client)
     github = FakeIssueClient()
     payload = {
@@ -90,11 +91,84 @@ def test_handle_webhook_issue_comment_is_a_tier_2_skip(fake_client):
         "comment": {"body": "/confirm", "user": {"login": "bob"}},
     }
     result = handle_webhook("issue_comment", payload, orch, github)
+    # No session known for issue 7 -> we return a DraftResult skipped.
     assert result is not None
-    assert result.status == "skipped"
-    # No work side-effects.
+    assert getattr(result, "status", "") == "skipped"
     assert github.issue_comments_posted == []
     assert fake_client.commands == []
+
+
+def test_handle_webhook_issue_comment_confirm_routes_through_refiner(fake_client):
+    """A `/confirm` on a PR with a known session hands off via the refiner."""
+    from agents.spec_generator.session_store import InMemorySessionStore
+
+    orch = Orchestrator(oc_client=fake_client)
+    github = FakeIssueClient()
+    sessions = InMemorySessionStore({7: "sess-known"})
+    payload = {
+        "action": "created",
+        "issue": {
+            "number": 7,
+            "title": "T",
+            "body": "B",
+            "pull_request": {"url": "x"},
+        },
+        "comment": {"body": "/confirm", "user": {"login": "alice"}},
+    }
+    outcome = handle_webhook(
+        "issue_comment", payload, orch, github, session_store=sessions
+    )
+    assert outcome is not None
+    assert getattr(outcome, "status", "") == "handed_off"
+    # PR-targeted label applied (the event carries a PR).
+    label_names = [name for _, name in github.pr_labels_added]
+    assert "intent-confirmed" in label_names
+
+
+def test_handle_webhook_skips_own_bot_comments(fake_client):
+    """The agent must not iterate on its own comments — infinite-loop hazard."""
+    from agents.spec_generator.session_store import InMemorySessionStore
+
+    orch = Orchestrator(oc_client=fake_client)
+    github = FakeIssueClient()
+    sessions = InMemorySessionStore({7: "sess-known"})
+    payload = {
+        "action": "created",
+        "issue": {"number": 7, "title": "T", "body": "B"},
+        "comment": {
+            "body": "I've drafted a design spec...",
+            "user": {"login": "spec-generator-bot[bot]"},
+        },
+    }
+    result = handle_webhook(
+        "issue_comment", payload, orch, github, session_store=sessions
+    )
+    assert result is not None
+    assert getattr(result, "status", "") == "skipped"
+    assert fake_client.commands == []
+
+
+def test_handle_webhook_persists_session_id_after_drafting(fake_client):
+    """Drafting must save the session id for later reporter comments."""
+    from agents.spec_generator.session_store import InMemorySessionStore
+
+    fake_client.set_command_result(
+        "speckit.specify",
+        {"parts": [{"type": "text", "text": "# Spec\n- captured\n"}]},
+    )
+    orch = Orchestrator(oc_client=fake_client)
+    github = FakeIssueClient(labels_by_issue={42: ["feature-request"]})
+    sessions = InMemorySessionStore()
+    handle_webhook(
+        "issues",
+        _issue_payload(labels=["feature-request"]),
+        orch,
+        github,
+        session_store=sessions,
+    )
+    # Drafter created `sess-1` (FakeOpenCodeClient counter); it must now be
+    # findable in the store for the next comment on issue 42.
+    assert sessions.get(42) == "sess-1"
 
 
 def test_handle_webhook_sensitive_escalation_writes_label_and_comment(fake_client):
