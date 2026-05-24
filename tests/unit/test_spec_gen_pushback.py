@@ -145,7 +145,10 @@ def test_act_tolerates_branch_already_exists(fake_gh):
     calls, script = fake_gh
     script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
     # POST /git/refs -> 422 because the branch already exists from prior run
-    script.append(HTTPError("u", 422, "Reference already exists", {}, io.BytesIO(b"{}")))
+    script.append(HTTPError(
+        "u", 422, "Reference already exists", {},
+        io.BytesIO(b'{"message":"Reference already exists"}'),
+    ))
     # GET contents -> 200 + same content (idempotent path)
     spec_body = "# spec body"
     script.append(_FakeResp(200, {
@@ -175,7 +178,10 @@ def test_act_updates_existing_file_with_blob_sha(fake_gh):
     calls, script = fake_gh
     script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
     # POST /git/refs -> branch already exists (422)
-    script.append(HTTPError("u", 422, "exists", {}, io.BytesIO(b"{}")))
+    script.append(HTTPError(
+        "u", 422, "exists", {},
+        io.BytesIO(b'{"message":"Reference already exists"}'),
+    ))
     # File exists -> 200 + blob SHA + base64 content.
     script.append(_FakeResp(200, {
         "sha": "blobsha789",
@@ -207,7 +213,10 @@ def test_act_idempotent_when_existing_content_matches(fake_gh):
     spec_body = "# spec body"
     script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
     # POST /git/refs -> 422 (branch already exists)
-    script.append(HTTPError("u", 422, "exists", {}, io.BytesIO(b"{}")))
+    script.append(HTTPError(
+        "u", 422, "exists", {},
+        io.BytesIO(b'{"message":"Reference already exists"}'),
+    ))
     # Existing file content matches what we'd write — no commit, just find/open PR.
     script.append(_FakeResp(200, {
         "sha": "blobsha",
@@ -276,6 +285,29 @@ def test_act_skips_when_no_token_available(fake_gh):
     assert pr is None
     assert calls == []
     assert any(r["event"] == "push-skipped" for r in log.records)
+
+
+def test_422_that_is_not_already_exists_raises(fake_gh):
+    """A non-already-exists 422 (e.g. invalid SHA) must surface as an error."""
+    calls, script = fake_gh
+    script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    script.append(HTTPError(
+        "u", 422, "Invalid SHA", {},
+        io.BytesIO(b'{"message":"Object does not exist"}'),
+    ))
+    log = EventLog()
+    with pytest.raises(RuntimeError, match="not already-exists"):
+        push_spec(
+            workspace_root="/tmp/x",
+            spec_path="docs/specs/x-design.md",
+            spec_body="x",
+            branch="agent/spec-0001-x",
+            push_url="https://x-access-token:tk@github.com/o/r.git",
+            issue=1,
+            title="x",
+            decision=RolloutDecision.ACT,
+            log=log,
+        )
 
 
 def test_extract_token_recovers_token_from_push_url():
