@@ -11,6 +11,10 @@ venv/
 .env.*
 !.env.example
 
+# GitHub App private keys (impl-bot + spec-generator-bot pems live here locally)
+keys/
+*.pem
+
 # OpenCode local state / session data
 opencode-data/
 *.db
