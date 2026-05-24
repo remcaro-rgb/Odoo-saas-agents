@@ -62,13 +62,25 @@ class Classifier(Protocol):
 # Sensitive content — secrets, PII, customer data. These patterns force the
 # classifier to refuse the draft regardless of label hints (defence in depth
 # against a reporter accidentally pasting a `.env` excerpt into the body).
+#
+# The `password` / `passwd` / `secret` / `api_key` / `private_key` markers
+# only match when they're *paired with a credential-shaped value*: assigned
+# (``=`` / ``:``) to something that is NOT a known weak/test stock value and
+# is 5+ characters long. This avoids false-positives on reproduction steps
+# that say `fill: input[name=password] = admin` for Odoo's default creds
+# (canary #59 was the smoking-gun example on 2026-05-24).
+_NOT_TEST_VALUE = (
+    r"(?!admin\b|demo\b|test\b|password\b|secret\b|"
+    r"default\b|changeme\b|1234\b|0000\b|\*+|<+|>+|\s*$)"
+)
 _SENSITIVE = re.compile(
-    r"\b(?:password|passwd|secret|api[_-]?key|private[_-]?key|"
-    r"BEGIN\s+(?:RSA|EC|OPENSSH|PRIVATE)\s+KEY|"
-    r"AKIA[0-9A-Z]{16}|"  # AWS access key prefix
-    r"sk_(?:live|test)_[0-9a-zA-Z]{24,}|"  # Stripe-style secrets
-    r"ssn|social\s+security|"
-    r"credit\s+card|cardholder)\b",
+    r"\b(?:password|passwd|secret|api[_-]?key|private[_-]?key)\s*[=:]\s*"
+    + _NOT_TEST_VALUE
+    + r"\S{5,}"
+    + r"|BEGIN\s+(?:RSA|EC|OPENSSH|PRIVATE)\s+KEY"
+    + r"|AKIA[0-9A-Z]{16}"           # AWS access key prefix
+    + r"|sk_(?:live|test)_[0-9a-zA-Z]{24,}"   # Stripe-style secrets
+    + r"|\b(?:ssn|social\s+security|credit\s+card|cardholder)\b",
     re.IGNORECASE,
 )
 
