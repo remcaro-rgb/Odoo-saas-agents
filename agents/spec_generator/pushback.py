@@ -92,10 +92,18 @@ def _gh_request(
             )
     except urllib.error.HTTPError as exc:
         raw = exc.read()
+        parsed: dict[str, Any] | None = None
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except json.JSONDecodeError:
+                parsed = None
         if exc.code == 404 and accept_404:
-            return _GhResponse(status=404, body=None, raw=raw)
+            return _GhResponse(status=404, body=parsed, raw=raw)
         if exc.code == 422 and accept_422:
-            return _GhResponse(status=422, body=None, raw=raw)
+            return _GhResponse(status=422, body=parsed, raw=raw)
         body_text = raw.decode("utf-8", errors="replace")[:500]
         raise RuntimeError(
             f"GitHub {method} {path} -> HTTP {exc.code}: {body_text}"
@@ -174,7 +182,19 @@ def push_spec(
     if create_ref.status == 201:
         log.emit("branch-created", branch=branch, base_sha=base_sha[:8])
     elif create_ref.status == 422:
-        log.emit("branch-exists", branch=branch)
+        # 422 = "Reference already exists" most of the time, but can also
+        # be "Invalid SHA" / "Reference does not match expected pattern".
+        # Distinguish via the body's `message` field — only treat the
+        # already-exists case as success; anything else must raise.
+        msg = ""
+        if isinstance(create_ref.body, dict):
+            msg = str(create_ref.body.get("message") or "")
+        if "already exists" in msg.lower():
+            log.emit("branch-exists", branch=branch)
+        else:
+            raise RuntimeError(
+                f"POST /repos/{repo}/git/refs -> 422 (not already-exists): {msg}"
+            )
 
     # 2. Check whether the file already exists on the agent branch (returns
     # the blob SHA needed for an UPDATE).
