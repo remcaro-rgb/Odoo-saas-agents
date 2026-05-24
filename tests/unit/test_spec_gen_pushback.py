@@ -1,157 +1,252 @@
-"""Unit tests for spec-generator pushback (Tier 2)."""
+"""Unit tests for spec-generator pushback (Tier 2, Contents-API).
+
+`push_spec` was refactored from `git commit`+`git push` to use the
+GitHub Contents API so commits are server-signed by the App's verified
+key (required by the `agent-spec-branches` ruleset on the data plane).
+
+These tests mock `urllib.request.urlopen` so the suite stays fully offline.
+"""
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
+import base64
+import io
+import json
+from typing import Any
+from urllib.error import HTTPError
 
 import pytest
 
 from agents.implementation.observability import EventLog
 from agents.implementation.rollout import RolloutDecision
-from agents.spec_generator.pushback import push_spec
+from agents.spec_generator import pushback
+from agents.spec_generator.pushback import _extract_repo, _extract_token, push_spec
 
 
-def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+class _FakeResp:
+    def __init__(self, status: int, body: Any = None):
+        self.status = status
+        self._payload = (
+            json.dumps(body).encode("utf-8") if body is not None else b""
+        )
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> _FakeResp:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
 
 
-def test_shadow_short_circuits_before_any_side_effect(tmp_path):
+@pytest.fixture()
+def fake_gh(monkeypatch):
+    """Replace urllib.request.urlopen with a programmable scripted responder."""
+    calls: list[dict[str, Any]] = []
+    script: list[Any] = []
+
+    def _urlopen(req, *args, **kwargs):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        method = (
+            req.get_method() if hasattr(req, "get_method") else "GET"
+        )
+        body = None
+        if hasattr(req, "data") and req.data:
+            body = json.loads(req.data.decode("utf-8"))
+        calls.append({"method": method, "url": url, "body": body})
+        if not script:
+            raise RuntimeError(f"unexpected call: {method} {url}")
+        next_resp = script.pop(0)
+        if isinstance(next_resp, BaseException):
+            raise next_resp
+        return next_resp
+
+    monkeypatch.setattr(pushback.urllib.request, "urlopen", _urlopen)
+    return calls, script
+
+
+def test_shadow_short_circuits_before_any_http(tmp_path, fake_gh):
+    calls, _ = fake_gh
     log = EventLog()
     pr = push_spec(
         workspace_root=str(tmp_path),
         spec_path="docs/specs/x-design.md",
         spec_body="# spec body",
         branch="agent/spec-0001-x",
-        push_url="https://example.invalid",
+        push_url="https://x-access-token:tk@github.com/o/r.git",
         issue=1,
         title="x",
         decision=RolloutDecision.SHADOW,
         log=log,
     )
     assert pr is None
-    # No file was written to the worktree.
-    assert not (tmp_path / "docs" / "specs" / "x-design.md").exists()
-    # The shadow-push intent was logged.
+    assert calls == []  # zero HTTP calls in SHADOW
     assert any(r["event"] == "shadow-push" for r in log.records)
 
 
-def test_act_writes_commits_and_attempts_push(tmp_path, monkeypatch):
-    # Init a real git repo so the commit step succeeds.
-    _git(tmp_path, "init", "--initial-branch=main", "-q")
-    _git(tmp_path, "config", "user.email", "test@example.com")
-    _git(tmp_path, "config", "user.name", "Test")
-    (tmp_path / "README.md").write_text("seed")
-    _git(tmp_path, "add", "README.md")
-    _git(tmp_path, "commit", "-q", "-m", "seed")
-
-    push_calls: list[list[str]] = []
-    pr_calls: list[list[str]] = []
-
-    real_run = subprocess.run
-
-    def _fake_run(cmd, *args, **kw):
-        # Allow all `git` commands to run for real (we want commit to land),
-        # but intercept `git push` (no remote) and `gh` (no network).
-        if cmd[:2] == ["git", "-C"] and len(cmd) > 3 and cmd[3] == "push":
-            push_calls.append(list(cmd))
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="", stderr=""
-            )
-        if cmd[:1] == ["gh"]:
-            pr_calls.append(list(cmd))
-            if cmd[1:3] == ["pr", "list"]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            if cmd[1:3] == ["pr", "create"]:
-                return subprocess.CompletedProcess(
-                    cmd,
-                    0,
-                    stdout="https://github.com/o/r/pull/42\n",
-                    stderr="",
-                )
-        return real_run(cmd, *args, **kw)
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+def test_act_creates_file_via_contents_api_and_opens_pr(fake_gh):
+    calls, script = fake_gh
+    # 1) GET /repos/o/r/branches/main -> base sha
+    script.append(_FakeResp(200, {"commit": {"sha": "basesha123456"}}))
+    # 2) GET contents -> 404 (file doesn't exist yet)
+    script.append(HTTPError("u", 404, "missing", {}, io.BytesIO(b"{}")))
+    # 3) PUT contents -> commit landed (server-signed)
+    script.append(_FakeResp(201, {"commit": {"sha": "newcommit123"}}))
+    # 4) GET pulls -> empty
+    script.append(_FakeResp(200, []))
+    # 5) POST pulls -> PR opened
+    script.append(_FakeResp(
+        201, {"number": 42, "html_url": "https://github.com/o/r/pull/42"}
+    ))
 
     log = EventLog()
     pr = push_spec(
-        workspace_root=str(tmp_path),
-        spec_path="docs/specs/0001-x-design.md",
+        workspace_root="/tmp/unused",
+        spec_path="docs/superpowers/specs/0001-x-design.md",
         spec_body="# Spec body\n\nSome content.\n",
         branch="agent/spec-0001-x",
-        push_url="https://x-access-token:tk@github.com/o/r.git",
+        push_url="https://x-access-token:bot-token-xyz@github.com/o/r.git",
         issue=1,
         title="x",
         decision=RolloutDecision.ACT,
         log=log,
         app_id="999",
     )
-    # File materialized.
-    assert (tmp_path / "docs" / "specs" / "0001-x-design.md").exists()
-    # Commit landed (the branch now exists and points at our new commit).
-    branches = subprocess.run(
-        ["git", "-C", str(tmp_path), "branch", "--list"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    assert "agent/spec-0001-x" in branches
-    # We attempted a push to the supplied URL.
-    assert any("push" in args for args in push_calls)
-    # PR creation was invoked.
-    assert any(c[1:3] == ["pr", "create"] for c in pr_calls)
     assert pr == 42
+    # 5 HTTP calls in the expected order.
+    methods = [(c["method"], c["url"].split("/repos/o/r")[1].split("?")[0]) for c in calls]
+    assert methods[0] == ("GET", "/branches/main")
+    assert methods[1] == ("GET", "/contents/docs/superpowers/specs/0001-x-design.md")
+    assert methods[2] == ("PUT", "/contents/docs/superpowers/specs/0001-x-design.md")
+    assert methods[3] == ("GET", "/pulls")
+    assert methods[4] == ("POST", "/pulls")
+    # PUT body has base64-encoded content + branch + committer.
+    put_body = calls[2]["body"]
+    assert put_body["branch"] == "agent/spec-0001-x"
+    decoded = base64.b64decode(put_body["content"]).decode("utf-8")
+    assert decoded == "# Spec body\n\nSome content.\n"
+    assert put_body["committer"]["email"].startswith("999+spec-generator-bot[bot]@")
+    # Log shows the verified commit + PR.
+    assert any(r["event"] == "committed-spec" and r.get("verified") for r in log.records)
+    assert any(r["event"] == "pr-created" and r.get("pr") == 42 for r in log.records)
 
 
-def test_act_idempotent_when_no_diff(tmp_path, monkeypatch):
-    """Re-running the agent on an unchanged spec must not crash."""
-    _git(tmp_path, "init", "--initial-branch=main", "-q")
-    _git(tmp_path, "config", "user.email", "test@example.com")
-    _git(tmp_path, "config", "user.name", "Test")
-    Path(tmp_path, "docs", "specs").mkdir(parents=True)
-    spec = tmp_path / "docs" / "specs" / "x-design.md"
-    spec.write_text("# spec body")
-    _git(tmp_path, "add", "docs/specs/x-design.md")
-    _git(tmp_path, "commit", "-q", "-m", "seed spec")
-    _git(tmp_path, "branch", "agent/spec-0001-x")
+def test_act_updates_existing_file_with_blob_sha(fake_gh):
+    calls, script = fake_gh
+    script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    # File exists -> 200 + blob SHA + base64 content.
+    script.append(_FakeResp(200, {
+        "sha": "blobsha789",
+        "content": base64.b64encode(b"# old content").decode("ascii"),
+    }))
+    script.append(_FakeResp(200, {"commit": {"sha": "updatedsha"}}))
+    script.append(_FakeResp(200, []))
+    script.append(_FakeResp(201, {"number": 7, "html_url": "..."}))
 
-    real_run = subprocess.run
+    log = EventLog()
+    push_spec(
+        workspace_root="/tmp/x",
+        spec_path="docs/specs/x-design.md",
+        spec_body="# new content",  # different from existing
+        branch="agent/spec-0001-x",
+        push_url="https://x-access-token:tk@github.com/o/r.git",
+        issue=1,
+        title="x",
+        decision=RolloutDecision.ACT,
+        log=log,
+    )
+    # PUT body included the blob SHA (the API requires it for updates).
+    assert calls[2]["body"]["sha"] == "blobsha789"
 
-    def _fake_run(cmd, *args, **kw):
-        if cmd[:1] == ["gh"]:
-            # Pretend a PR already exists.
-            if cmd[1:3] == ["pr", "list"]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="42\n", stderr="")
-        return real_run(cmd, *args, **kw)
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+def test_act_idempotent_when_existing_content_matches(fake_gh):
+    calls, script = fake_gh
+    spec_body = "# spec body"
+    script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    # Existing file content matches what we'd write — no commit, just find/open PR.
+    script.append(_FakeResp(200, {
+        "sha": "blobsha",
+        "content": base64.b64encode(spec_body.encode("utf-8")).decode("ascii"),
+    }))
+    # No PUT expected; next call is the GET /pulls to find the existing PR.
+    script.append(_FakeResp(200, [{"number": 42, "html_url": "..."}]))
 
     log = EventLog()
     pr = push_spec(
-        workspace_root=str(tmp_path),
+        workspace_root="/tmp/x",
         spec_path="docs/specs/x-design.md",
-        spec_body="# spec body",  # same content -> no diff
+        spec_body=spec_body,
         branch="agent/spec-0001-x",
-        push_url="https://x:tk@github.com/o/r.git",
+        push_url="https://x-access-token:tk@github.com/o/r.git",
         issue=1,
         title="x",
         decision=RolloutDecision.ACT,
         log=log,
     )
     assert pr == 42
+    # No PUT call was made — the third call was GET /pulls, not PUT.
+    methods = [c["method"] for c in calls]
+    assert "PUT" not in methods
     assert any(r["event"] == "nothing-to-commit" for r in log.records)
 
 
-def test_act_aborts_cleanly_when_git_unavailable(tmp_path):
-    """A non-git workspace surfaces the git error, doesn't silently corrupt."""
+def test_act_returns_existing_pr_when_one_is_already_open(fake_gh):
+    calls, script = fake_gh
+    script.append(_FakeResp(200, {"commit": {"sha": "basesha"}}))
+    script.append(HTTPError("u", 404, "missing", {}, io.BytesIO(b"{}")))
+    script.append(_FakeResp(201, {"commit": {"sha": "newsha"}}))
+    script.append(_FakeResp(200, [{"number": 99}]))  # one open PR
+
     log = EventLog()
-    with pytest.raises(subprocess.CalledProcessError):
-        push_spec(
-            workspace_root=str(tmp_path),  # no git repo here
-            spec_path="x.md",
-            spec_body="content",
-            branch="agent/spec-1-x",
-            push_url="https://x@github.com/o/r.git",
-            issue=1,
-            title="x",
-            decision=RolloutDecision.ACT,
-            log=log,
-        )
+    pr = push_spec(
+        workspace_root="/tmp/x",
+        spec_path="docs/specs/x-design.md",
+        spec_body="content",
+        branch="agent/spec-0001-x",
+        push_url="https://x-access-token:tk@github.com/o/r.git",
+        issue=1,
+        title="x",
+        decision=RolloutDecision.ACT,
+        log=log,
+    )
+    assert pr == 99
+    assert any(r["event"] == "pr-exists" for r in log.records)
+
+
+def test_act_skips_when_no_token_available(fake_gh):
+    calls, _ = fake_gh
+    log = EventLog()
+    pr = push_spec(
+        workspace_root="/tmp/x",
+        spec_path="docs/specs/x-design.md",
+        spec_body="x",
+        branch="agent/spec-1-x",
+        push_url="https://example.invalid",  # no x-access-token in URL
+        issue=1,
+        title="x",
+        decision=RolloutDecision.ACT,
+        log=log,
+    )
+    assert pr is None
+    assert calls == []
+    assert any(r["event"] == "push-skipped" for r in log.records)
+
+
+def test_extract_token_recovers_token_from_push_url():
+    url = "https://x-access-token:tok-abc@github.com/o/r.git"
+    assert _extract_token(url) == "tok-abc"
+
+
+def test_extract_token_returns_none_for_unsigned_url():
+    assert _extract_token("https://example.com/foo.git") is None
+
+
+def test_extract_repo_strips_dot_git():
+    assert (
+        _extract_repo("https://x:tk@github.com/owner/repo.git") == "owner/repo"
+    )
+
+
+def test_extract_repo_handles_missing_dot_git():
+    assert _extract_repo("https://x:tk@github.com/owner/repo") == "owner/repo"

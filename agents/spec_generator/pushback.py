@@ -1,32 +1,298 @@
 """Push the drafted spec to a new branch and open the spec PR (Tier 2).
 
-The drafter produces a `DraftedSpec` in memory; this module:
+Uses the GitHub Contents API instead of ``git commit`` + ``git push`` so
+GitHub server-signs the commit with the App's verified key. Required by the
+``agent-spec-branches`` ruleset on ``GoliattCo/odoo-custom``: pushes to
+``refs/heads/agent/spec-*`` are rejected unless ``required_signatures`` is
+satisfied, and a runner-side ``git commit`` produces an unsigned commit.
 
-1. Writes the spec body to ``<workspace>/<path>`` (creating parent dirs).
-2. Commits as ``spec-generator-bot[bot]`` (the GitHub App noreply email).
-3. Pushes to ``<branch>`` using a short-lived App installation token.
-4. Opens the spec PR via ``gh pr create`` (idempotent — re-runs are a no-op
-   if the PR already exists).
+Flow:
 
-Shadow-aware: in SHADOW, every external side-effect is logged-only — no
-file is written to the worktree, no commit is created, no push is made.
-The event log captures *what would have happened* so the SHADOW audit is
-faithful.
+1. Resolve the base branch's tip SHA (``GET /repos/.../branches/{base}``).
+2. Look up the spec file on the agent branch if it exists
+   (``GET /repos/.../contents/{path}?ref=<branch>``) — yields the blob SHA
+   for an update, or 404 for a create.
+3. Create or update the file in one call
+   (``PUT /repos/.../contents/{path}`` with ``branch`` and optional ``sha``).
+   GitHub creates the branch automatically when it doesn't exist, derives
+   a single-file commit from the base branch's tip, and signs it.
+4. Open the spec PR if one doesn't already exist.
 
-Mirrors the implementation agent's ``pushback.push_implementation`` shape
-but is materially simpler — Spec Generator writes one file, never patches.
+Shadow-aware: SHADOW short-circuits before any HTTP call.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import subprocess
-from pathlib import Path
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
 
 from agents.implementation.observability import EventLog
 from agents.implementation.rollout import RolloutDecision
 
 BOT_NAME = "spec-generator-bot[bot]"
+GITHUB_API_BASE = "https://api.github.com"
+
+
+def _bot_email(app_id: str | None) -> str:
+    """The canonical ``<id>+spec-generator-bot[bot]@users.noreply.github.com``."""
+    if not app_id:
+        return "spec-generator-bot[bot]@users.noreply.github.com"
+    return f"{app_id}+spec-generator-bot[bot]@users.noreply.github.com"
+
+
+@dataclass
+class _GhResponse:
+    status: int
+    body: dict[str, Any] | list[Any] | None
+    raw: bytes
+
+
+def _gh_request(
+    method: str,
+    path: str,
+    *,
+    token: str,
+    body: dict[str, Any] | None = None,
+    accept_404: bool = False,
+) -> _GhResponse:
+    """Authed GitHub REST call. Returns parsed JSON + status.
+
+    ``accept_404`` makes a missing resource (typically a file that doesn't
+    exist yet on the branch) a non-error response so the caller can branch
+    on ``status``.
+    """
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        url=f"{GITHUB_API_BASE}{path}",
+        data=data,
+        method=method,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "spec-generator-bot",
+            **({"Content-Type": "application/json"} if data else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30.0) as resp:
+            raw = resp.read()
+            return _GhResponse(
+                status=resp.status,
+                body=json.loads(raw) if raw else None,
+                raw=raw,
+            )
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        if exc.code == 404 and accept_404:
+            return _GhResponse(status=404, body=None, raw=raw)
+        body_text = raw.decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(
+            f"GitHub {method} {path} -> HTTP {exc.code}: {body_text}"
+        ) from exc
+
+
+def push_spec(
+    *,
+    workspace_root: str,           # kept for parity with the impl-bot's API; unused here
+    spec_path: str,
+    spec_body: str,
+    branch: str,
+    push_url: str,                 # legacy; only used to extract the bot token
+    issue: int,
+    title: str,
+    decision: RolloutDecision,
+    log: EventLog,
+    app_id: str | None = None,
+    base_branch: str = "main",
+    repo: str | None = None,
+    token: str | None = None,
+) -> int | None:
+    """Create or update the spec file on ``branch`` and open the spec PR.
+
+    Returns the PR number on success, or ``None`` for SHADOW / PR-creation
+    deferral. The commit is server-signed by GitHub because the API is
+    called with the spec-generator-bot App's installation token.
+
+    Backwards-compat: callers that still pass ``push_url`` with the bot
+    token embedded (the old ``git push`` shape) get the token extracted
+    automatically. New callers should pass ``token`` + ``repo`` directly.
+    """
+    if decision is RolloutDecision.SHADOW:
+        log.emit(
+            "shadow-push",
+            branch=branch,
+            spec_path=spec_path,
+            bytes=len(spec_body or ""),
+            issue=issue,
+        )
+        return None
+
+    token = token or _extract_token(push_url)
+    if token is None:
+        log.emit("push-skipped", reason="no GitHub token available")
+        return None
+    repo = repo or _extract_repo(push_url)
+    if repo is None:
+        log.emit("push-skipped", reason="cannot resolve owner/repo from push URL")
+        return None
+
+    # 1. Resolve the base branch's tip SHA — only needed to verify the base
+    # exists before we try to create the agent branch off it.
+    base_resp = _gh_request(
+        "GET", f"/repos/{repo}/branches/{base_branch}", token=token
+    )
+    base_body = base_resp.body if isinstance(base_resp.body, dict) else {}
+    base_sha = (base_body.get("commit") or {}).get("sha")
+    if not base_sha:
+        raise RuntimeError(
+            f"cannot resolve base branch {base_branch} on {repo}"
+        )
+
+    # 2. Check whether the file already exists on the agent branch (returns
+    # the blob SHA needed for an UPDATE).
+    existing = _gh_request(
+        "GET",
+        f"/repos/{repo}/contents/{spec_path}?ref={branch}",
+        token=token,
+        accept_404=True,
+    )
+    existing_sha = None
+    if existing.status == 200 and isinstance(existing.body, dict):
+        existing_sha = existing.body.get("sha")
+        existing_content = existing.body.get("content", "")
+        # base64 with newlines per RFC 4648 §3.2 — decode + compare to skip
+        # a no-op commit so reruns stay idempotent.
+        try:
+            current_bytes = base64.b64decode(existing_content)
+            if current_bytes.decode("utf-8") == spec_body:
+                log.emit(
+                    "nothing-to-commit", path=spec_path, branch=branch,
+                    note="file already up to date on branch",
+                )
+                return _ensure_pr(
+                    repo=repo, branch=branch, base_branch=base_branch,
+                    issue=issue, title=title, spec_path=spec_path,
+                    log=log, token=token,
+                )
+        except (ValueError, UnicodeDecodeError):
+            # Treat undecodable content as "different" and proceed with update.
+            pass
+
+    # 3. PUT the file. GitHub creates the branch if missing (off base_branch)
+    # and produces a verified-signature commit because the actor is the App.
+    put_body: dict[str, Any] = {
+        "message": f"Spec Generator — draft spec for issue #{issue}",
+        "content": base64.b64encode(spec_body.encode("utf-8")).decode("ascii"),
+        "branch": branch,
+        "committer": {"name": BOT_NAME, "email": _bot_email(app_id)},
+    }
+    if existing_sha:
+        put_body["sha"] = existing_sha
+    put_resp = _gh_request(
+        "PUT", f"/repos/{repo}/contents/{spec_path}", token=token, body=put_body
+    )
+    put_resp_body = put_resp.body if isinstance(put_resp.body, dict) else {}
+    commit_sha = str((put_resp_body.get("commit") or {}).get("sha", ""))[:8]
+    log.emit(
+        "committed-spec",
+        branch=branch,
+        path=spec_path,
+        sha=commit_sha,
+        verified=True,
+    )
+
+    # 4. Open the PR (or find the existing one).
+    return _ensure_pr(
+        repo=repo, branch=branch, base_branch=base_branch,
+        issue=issue, title=title, spec_path=spec_path,
+        log=log, token=token,
+    )
+
+
+def _ensure_pr(
+    *,
+    repo: str,
+    branch: str,
+    base_branch: str,
+    issue: int,
+    title: str,
+    spec_path: str,
+    log: EventLog,
+    token: str,
+) -> int | None:
+    """Find or create the spec PR via the REST API."""
+    existing = _gh_request(
+        "GET",
+        f"/repos/{repo}/pulls?head={repo.split('/')[0]}:{branch}&state=open",
+        token=token,
+    )
+    if isinstance(existing.body, list) and existing.body:
+        pr_number = existing.body[0].get("number")
+        log.emit("pr-exists", pr=pr_number, branch=branch)
+        return int(pr_number) if pr_number else None
+
+    body = (
+        f"Spec Generator — drafted in response to issue #{issue}.\n\n"
+        f"Spec: {spec_path}\n\n"
+        f"This PR contains the design spec at `{spec_path}`.\n\n"
+        f"Comment `/confirm` on issue #{issue} (or here) to advance the "
+        f"`intent-confirmed` label and hand the spec off to the "
+        f"Implementation Agent. If no questions land in the next 24 hours, "
+        f"the sweep job will confirm automatically."
+    )
+    create = _gh_request(
+        "POST",
+        f"/repos/{repo}/pulls",
+        token=token,
+        body={
+            "title": f"spec: {title}",
+            "body": body,
+            "head": branch,
+            "base": base_branch,
+        },
+    )
+    create_body = create.body if isinstance(create.body, dict) else {}
+    pr_number = create_body.get("number")
+    log.emit(
+        "pr-created",
+        pr=pr_number,
+        url=create_body.get("html_url"),
+    )
+    return int(pr_number) if pr_number else None
+
+
+def _extract_token(push_url: str | None) -> str | None:
+    """Pull ``x-access-token:<token>@...`` out of a legacy push URL."""
+    if not push_url or "x-access-token:" not in push_url:
+        return None
+    try:
+        return push_url.split("x-access-token:", 1)[1].split("@", 1)[0]
+    except IndexError:
+        return None
+
+
+def _extract_repo(push_url: str | None) -> str | None:
+    """Pull ``owner/name`` out of ``https://...@github.com/owner/name.git``."""
+    if not push_url:
+        return None
+    try:
+        path = push_url.split("github.com/", 1)[1]
+        return path.removesuffix(".git").strip("/")
+    except IndexError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Legacy helpers retained so existing callers / tests that still reach for
+# `_git` keep working. Marked private; they are not part of the public API.
+# ---------------------------------------------------------------------------
 
 
 def _git(
@@ -35,13 +301,11 @@ def _git(
     check: bool = True,
     stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``git -C <workspace_root> <args>``. Surfaces stderr on failure."""
+    """Legacy git wrapper — kept for the unit-test surface that asserted on
+    ``CalledProcessError`` propagation. Production no longer uses this path."""
     proc = subprocess.run(
         ["git", "-C", workspace_root, *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        input=stdin,
+        check=False, capture_output=True, text=True, input=stdin,
     )
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
@@ -54,178 +318,13 @@ def _git(
     return proc
 
 
-def _bot_email(app_id: str | None) -> str:
-    """The canonical ``<id>+spec-generator-bot[bot]@users.noreply.github.com``."""
-    if not app_id:
-        return "spec-generator-bot[bot]@users.noreply.github.com"
-    return f"{app_id}+spec-generator-bot[bot]@users.noreply.github.com"
-
-
-def push_spec(
-    *,
-    workspace_root: str,
-    spec_path: str,
-    spec_body: str,
-    branch: str,
-    push_url: str,
-    issue: int,
-    title: str,
-    decision: RolloutDecision,
-    log: EventLog,
-    app_id: str | None = None,
-    base_branch: str = "main",
-) -> int | None:
-    """Write, commit, push the spec; open the PR. Returns the PR number or `None`.
-
-    ``push_url`` is the URL with the bot token embedded — built by the
-    composition root from ``GH_TOKEN``. SHADOW short-circuits before any
-    side-effect.
-    """
-    if decision is RolloutDecision.SHADOW:
-        log.emit(
-            "shadow-push",
-            branch=branch,
-            spec_path=spec_path,
-            bytes=len(spec_body or ""),
-            issue=issue,
-        )
-        return None
-
-    # 1. Materialize the spec file.
-    full_path = Path(workspace_root) / spec_path
-    full_path.parent.mkdir(parents=True, exist_ok=True)
-    full_path.write_text(spec_body, encoding="utf-8")
-    log.emit("wrote-spec", path=spec_path, bytes=len(spec_body))
-
-    # 2. Configure the bot identity (per-repo, no global).
-    _git(workspace_root, "config", "user.name", BOT_NAME)
-    _git(workspace_root, "config", "user.email", _bot_email(app_id))
-
-    # 3. Switch to (or create) the agent branch.
-    proc = _git(workspace_root, "branch", "--show-current", check=False)
-    current = (proc.stdout or "").strip()
-    if current != branch:
-        # `git switch` creates the branch off HEAD if it doesn't exist, or
-        # checks out the existing one. `-c` errors if the branch exists; we
-        # use a two-step to be idempotent.
-        ls = _git(workspace_root, "rev-parse", "--verify", branch, check=False)
-        if ls.returncode == 0:
-            _git(workspace_root, "switch", branch)
-        else:
-            _git(workspace_root, "switch", "-c", branch)
-
-    # 4. Stage + commit. Skip the commit if nothing changed (a re-run on
-    # the same spec is idempotent — there is nothing to push).
-    _git(workspace_root, "add", spec_path)
-    diff = _git(workspace_root, "diff", "--cached", "--quiet", check=False)
-    if diff.returncode == 0:
-        log.emit("nothing-to-commit", path=spec_path)
-        return _ensure_pr(
-            workspace_root=workspace_root,
-            branch=branch,
-            base_branch=base_branch,
-            issue=issue,
-            title=title,
-            spec_path=spec_path,
-            log=log,
-        )
-    _git(
-        workspace_root,
-        "commit",
-        "-m",
-        f"Spec Generator — draft spec for issue #{issue}",
-    )
-    log.emit("committed-spec", branch=branch, path=spec_path)
-
-    # 5. Push. Strip any existing remote-tracking so the explicit URL wins.
-    _git(workspace_root, "push", "--force-with-lease", push_url, f"HEAD:{branch}")
-    log.emit("pushed-branch", branch=branch)
-
-    return _ensure_pr(
-        workspace_root=workspace_root,
-        branch=branch,
-        base_branch=base_branch,
-        issue=issue,
-        title=title,
-        spec_path=spec_path,
-        log=log,
-    )
-
-
-def _ensure_pr(
-    *,
-    workspace_root: str,
-    branch: str,
-    base_branch: str,
-    issue: int,
-    title: str,
-    spec_path: str,
-    log: EventLog,
-) -> int | None:
-    """Find an existing PR for `branch`, or open a new one. Returns PR number.
-
-    The Action runner has `gh` available; we shell out rather than depend
-    on a Python GitHub SDK (consistent with `github_io.GhCliIssueClient`).
-    """
-    existing = _gh_pr_for_branch(workspace_root, branch)
-    if existing is not None:
-        log.emit("pr-exists", pr=existing, branch=branch)
-        return existing
-
-    body = (
-        f"Spec Generator — drafted in response to issue #{issue}.\n\n"
-        f"This PR contains the design spec at `{spec_path}`.\n\n"
-        f"Comment `/confirm` on issue #{issue} (or here) to advance the "
-        f"`intent-confirmed` label and hand the spec off to the "
-        f"Implementation Agent. If no questions land in the next 24 hours, "
-        f"the sweep job will confirm automatically."
-    )
-    proc = subprocess.run(
-        [
-            "gh", "pr", "create",
-            "--title", f"spec: {title}",
-            "--body", body,
-            "--head", branch,
-            "--base", base_branch,
-        ],
-        cwd=workspace_root,
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**os.environ},
-    )
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        log.emit("pr-create-failed", branch=branch, stderr=stderr[:500])
-        return None
-    # gh prints the new PR URL — extract the trailing number.
-    url = (proc.stdout or "").strip().splitlines()[-1] if proc.stdout else ""
-    number = _parse_pr_url(url)
-    log.emit("pr-created", pr=number, url=url)
-    return number
-
-
-def _gh_pr_for_branch(workspace_root: str, branch: str) -> int | None:
-    proc = subprocess.run(
-        [
-            "gh", "pr", "list",
-            "--head", branch,
-            "--state", "open",
-            "--json", "number",
-            "--jq", ".[0].number // empty",
-        ],
-        cwd=workspace_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    text = (proc.stdout or "").strip()
-    return int(text) if text.isdigit() else None
-
-
 def _parse_pr_url(url: str) -> int | None:
-    """`https://github.com/owner/repo/pull/123` -> 123. None if unparseable."""
+    """`https://github.com/owner/repo/pull/123` -> 123. Kept for backwards-compat."""
     if not url:
         return None
     tail = url.rstrip("/").rsplit("/", 1)[-1]
     return int(tail) if tail.isdigit() else None
+
+
+# Silence unused-import warnings for `os` (kept available for future env reads).
+_ = os
