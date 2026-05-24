@@ -17,7 +17,7 @@ import subprocess
 import sys
 from typing import Any, Protocol, runtime_checkable
 
-from .commenter import escalation_notice, human_commit_ping, implementation_ready
+from .commenter import escalation_notice, human_commit_ping
 from .core import FlowResult, IterationResult, Orchestrator
 from .events import Event, EventType
 from .github_adapter import event_from_webhook
@@ -56,6 +56,7 @@ class GitHubClient(Protocol):
     def pr_head_branch(self, pr: int) -> str: ...
     def pr_changed_files(self, pr: int) -> list[str]: ...
     def pr_for_branch(self, branch: str) -> int | None: ...
+    def pr_comments(self, pr: int) -> list[str]: ...
 
 
 class FakeGitHubClient:
@@ -91,6 +92,9 @@ class FakeGitHubClient:
 
     def pr_for_branch(self, branch: str) -> int | None:
         return self._prs.get(branch)
+
+    def pr_comments(self, pr: int) -> list[str]:
+        return [body for p, body in self.comments if p == pr]
 
 
 class GhCliClient:
@@ -150,6 +154,21 @@ class GhCliClient:
         ).strip()
         return int(out) if out else None
 
+    def pr_comments(self, pr: int) -> list[str]:
+        """All comment bodies on the PR (live read via `gh pr view`).
+
+        Used by the composition root to dedup the bot's "implementation
+        ready" success comment via its trailing ``<!-- impl-agent -->``
+        marker — if the marker is already present from a prior run, the
+        new post is suppressed (was the root cause of three stale
+        duplicates on PR #35 across Tier-6 / Tier-7 retries).
+        """
+        out = self._gh(
+            "pr", "view", str(pr), "--json", "comments",
+            "--jq", ".comments[].body",
+        )
+        return [line for line in out.splitlines() if line]
+
 
 class ShadowGitHubClient:
     """A shadow-mode `GitHubClient`: real reads, recorded-but-not-sent writes.
@@ -182,6 +201,9 @@ class ShadowGitHubClient:
 
     def pr_for_branch(self, branch: str) -> int | None:
         return self._reader.pr_for_branch(branch)
+
+    def pr_comments(self, pr: int) -> list[str]:
+        return self._reader.pr_comments(pr)
 
 
 def handle_webhook(
@@ -273,11 +295,17 @@ def _handle_intent_confirmed(
     # The implement flow checks out event.branch and reads event.spec_path.
     event.spec_path = spec_path
     result = orchestrator.implement(event)
-    if result.status == "implemented":
-        github.post_comment(
-            event.pr, implementation_ready(f"Implemented `{spec_path}`.")
-        )
-    else:
+    # Carry the spec path forward so the composition root can post the
+    # "implementation ready" comment AFTER `_maybe_push` succeeds — posting
+    # it here (pre-push) would lie on every push crash (Tier-7 retries 1–8
+    # surfaced this exact failure mode on PR #36 + 3 duplicate "implemented
+    # and pushed" comments left stale on PR #35).
+    result.spec_path = spec_path
+    if result.status != "implemented":
+        # Escalation comment + label go out HERE — they describe planning /
+        # coding failure, not push state, and posting them is the whole
+        # point of the escalation path. The push won't run for escalated
+        # results (`_maybe_push` guards on status="implemented").
         github.post_comment(
             event.pr,
             escalation_notice("implementation-escalated", _escalation_detail(result)),

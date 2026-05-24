@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .commenter import implementation_ready
 from .core import FlowResult, IterationResult, Orchestrator, feature_name
 from .gate1 import Gate1, SubprocessCheckRunner
 from .git_workspace import GitWorkspace
@@ -281,6 +282,15 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         # records the would-push and returns. The push needs the App token +
         # repo + a result that carries the session id and branch.
         _maybe_push(config, client, decision, result, log)
+        # Push lands FIRST, comment posts SECOND. The reverse order had the
+        # comment ("I've implemented and pushed") lying on every push crash,
+        # and across the Tier-7 retry storm left three duplicate "implemented
+        # and pushed" comments on PR #35 — see Tier-7 follow-up 2026-05-24.
+        # `_post_implementation_success_comment` is dedup-safe: it checks
+        # the PR's existing comments for the same spec path before posting.
+        _post_implementation_success_comment(
+            github, result, _extract_pr(event_name, payload)
+        )
     except Exception as exc:
         traceback.print_exc()
         log.emit("error", detail=f"{type(exc).__name__}: {exc}")
@@ -299,6 +309,42 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
         pr=_extract_pr(event_name, payload),
     )
     return 0
+
+
+def _post_implementation_success_comment(
+    github: GitHubClient,
+    result: FlowResult | IterationResult | None,
+    pr: int | None,
+) -> None:
+    """Post the bot's "I've implemented this spec and pushed the code"
+    comment AFTER the push has actually landed.
+
+    No-op unless the result is an `implemented` flow-result with a known
+    spec path AND a PR number AND no prior post for the same spec is
+    already on the PR. The dedup check fixes the three stale duplicate
+    comments left on PR #35 across Tier-6 / Tier-7 retries (the workflow
+    re-fires on each `intent-confirmed` label toggle).
+
+    The escalation comment in `_handle_intent_confirmed` is intentionally
+    NOT moved here — escalations describe planning / coding failure, not
+    push state, and the push never runs for escalated results.
+    """
+    if pr is None or result is None:
+        return
+    if not isinstance(result, FlowResult) or result.status != "implemented":
+        return
+    spec_path = result.spec_path
+    if not spec_path:
+        return
+    marker = f"Implemented `{spec_path}`."
+    try:
+        prior = github.pr_comments(pr)
+    except Exception:  # noqa: BLE001
+        # Best effort: a read failure must not block the (correct) post.
+        prior = []
+    if any(marker in body for body in prior):
+        return
+    github.post_comment(pr, implementation_ready(marker))
 
 
 def _maybe_push(

@@ -4,6 +4,7 @@ import json
 
 from agents.implementation.app import (
     AgentConfig,
+    _post_implementation_success_comment,
     build_github,
     build_notifier,
     build_orchestrator,
@@ -21,7 +22,11 @@ from agents.implementation.core import (
     PlanningResult,
 )
 from agents.implementation.gate1 import Gate1
-from agents.implementation.github_io import GhCliClient, ShadowGitHubClient
+from agents.implementation.github_io import (
+    FakeGitHubClient,
+    GhCliClient,
+    ShadowGitHubClient,
+)
 from agents.implementation.notifier import FakeNotifier, SlackNotifier
 from agents.implementation.observability import EventLog
 from agents.implementation.opencode_client import DEFAULT_BASE_URL
@@ -358,3 +363,85 @@ def test_main_delegates_to_run(monkeypatch):
     monkeypatch.setattr("agents.implementation.app.run", fake_run)
     assert main() == 0
     assert captured["env"] is os.environ
+
+
+# -- _post_implementation_success_comment (Tier-7 follow-up 2026-05-24) -------
+def _flow(status: str = "implemented", spec_path: str | None = "specs/x-fix.md"):
+    return FlowResult(
+        status=status,
+        stage="implement",
+        planning=PlanningResult(status="ready_to_implement", feature="x"),
+        spec_path=spec_path,
+    )
+
+
+def test_post_success_comment_posts_with_spec_path_marker():
+    """The success comment includes the spec path so subsequent runs can
+    dedup against it. The whole point of moving this post out of
+    `_handle_intent_confirmed` was to delay it until AFTER `_maybe_push`
+    succeeds (so it cannot lie about a push that never happened)."""
+    github = FakeGitHubClient()
+    _post_implementation_success_comment(github, _flow(), pr=42)
+    assert len(github.comments) == 1
+    pr, body = github.comments[0]
+    assert pr == 42
+    assert "Implemented `specs/x-fix.md`." in body
+
+
+def test_post_success_comment_dedups_against_prior_post_for_same_spec():
+    """Three duplicate `implementation-bot-goliattco[bot]` "I've implemented
+    this spec and pushed the code" comments on PR #35 across Tier-6 / Tier-7
+    retries motivated this: re-triggering the workflow on the same PR must
+    not spam fresh duplicate success comments. Dedup keys on the spec-path
+    marker in the comment body — `Implemented \\`<spec_path>\\`.` is what
+    `implementation_ready` always emits, and only ever for that spec."""
+    github = FakeGitHubClient()
+    # Seed a prior bot comment for the same spec.
+    github.post_comment(42, "I've implemented this spec and pushed the code.\n\n"
+                            "Implemented `specs/x-fix.md`.\n\n<!-- impl-agent -->")
+    assert len(github.comments) == 1
+    _post_implementation_success_comment(github, _flow(), pr=42)
+    # No new comment added — the dedup filter caught it.
+    assert len(github.comments) == 1
+
+
+def test_post_success_comment_skips_when_pr_is_missing():
+    """No PR number (e.g. malformed payload, or non-PR webhook) → no-op."""
+    github = FakeGitHubClient()
+    _post_implementation_success_comment(github, _flow(), pr=None)
+    assert github.comments == []
+
+
+def test_post_success_comment_skips_when_result_is_escalated():
+    """Escalations are commented by `_handle_intent_confirmed` (pre-push);
+    the post-push success path must NOT also fire on them."""
+    github = FakeGitHubClient()
+    _post_implementation_success_comment(
+        github, _flow(status="escalated"), pr=42,
+    )
+    assert github.comments == []
+
+
+def test_post_success_comment_skips_when_spec_path_is_missing():
+    """A flow result without `spec_path` (older entry points / non-
+    intent-confirmed paths) has nothing to dedup against — skip rather
+    than post a comment that says `Implemented \\`None\\``."""
+    github = FakeGitHubClient()
+    _post_implementation_success_comment(
+        github, _flow(spec_path=None), pr=42,
+    )
+    assert github.comments == []
+
+
+def test_post_success_comment_skips_when_result_is_iteration_not_flow():
+    """`IterationResult` (reporter iteration on a PR comment) is NOT the
+    intent-confirmed implement flow and uses its own commenter
+    (`iteration_update`). The success-path comment fires only for
+    `FlowResult` results."""
+    github = FakeGitHubClient()
+    it = IterationResult(
+        intent=CommentIntent.NOISE,
+        status="iterated",
+    )
+    _post_implementation_success_comment(github, it, pr=42)
+    assert github.comments == []

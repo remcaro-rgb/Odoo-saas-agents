@@ -60,6 +60,12 @@ class FlowResult:
     # can drive the implement→PR-branch push (`pushback.push_implementation`).
     session_id: str | None = None
     branch: str | None = None
+    # The spec the agent implemented, relative to the data-plane repo root.
+    # Carried through so the composition root can post the "implementation
+    # ready" comment AFTER the push succeeds (was previously posted inside
+    # `_handle_intent_confirmed` BEFORE the push, which made the comment
+    # lie when the push then crashed — Tier-7 follow-up 2026-05-24).
+    spec_path: str | None = None
 
 
 @dataclass

@@ -118,9 +118,21 @@ def test_handle_webhook_ignores_a_comment_with_no_pr_number(fake_client):
     assert fake_client.commands == []
 
 
-def test_handle_webhook_intent_confirmed_runs_implement_and_writes_back(fake_client):
-    """A labeled (intent-confirmed) PR runs the full implement flow, and the
-    outcome is written back as a PR comment."""
+def test_handle_webhook_intent_confirmed_runs_implement_and_carries_spec_path(
+    fake_client,
+):
+    """A labeled (intent-confirmed) PR runs the full implement flow. The
+    "implementation ready" comment is NOT posted from here — that gets posted
+    by the composition root AFTER the push actually lands, so the comment
+    can't claim "pushed the code" before the push attempt happens (and then
+    crashes — see Tier-7 PR #36 retries 1–8). handle_webhook just carries
+    the spec_path forward on the result for the composition root to use.
+
+    Regression — Tier-7 follow-up 2026-05-24: the prior assertion expected
+    `github.comments` to be non-empty after handle_webhook returned, which
+    means the bot's "I've implemented and pushed" comment fired BEFORE the
+    push and lied on every crash.
+    """
     fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace({_SPEC_PATH: _DESIGN_SPEC, **_clean_addon_files()})
     github = FakeGitHubClient(changed_files={17: [_SPEC_PATH]})
@@ -128,7 +140,11 @@ def test_handle_webhook_intent_confirmed_runs_implement_and_writes_back(fake_cli
     result = handle_webhook("pull_request", _intent_confirmed_payload(), orch, github)
     assert result is not None
     assert result.status == "implemented"
-    assert github.comments and github.comments[0][0] == 17
+    # The flow carries the spec it implemented so the composition root can
+    # post the success comment AFTER the push lands.
+    assert result.spec_path == _SPEC_PATH
+    # No comment yet — implementation_ready posts in app.run after _maybe_push.
+    assert github.comments == []
     assert github.labels == []  # success — no escalation label
     assert "speckit.implement" in [c["command"] for c in fake_client.commands]
 
@@ -355,8 +371,10 @@ def test_shadow_github_client_delegates_reads_to_the_real_client():
 
 def test_handle_webhook_through_shadow_client_runs_but_posts_nothing(fake_client):
     """A full implement flow run with a ShadowGitHubClient resolves the spec and
-    runs implement (recorded on the OpenCode fake) but posts no comment / label
-    to the wrapped real client — the faithful "draft, don't send" shadow."""
+    runs implement (recorded on the OpenCode fake) and writes no comment to
+    GitHub via the wrapped reader. The success-comment post moved to the
+    composition root (post-`_maybe_push`); from handle_webhook's point of
+    view, the SUCCESS path is silent (escalations still post a draft)."""
     fake_client.set_command_result("speckit.analyze", CLEAN_ANALYZE)
     ws = InMemoryWorkspace({_SPEC_PATH: _DESIGN_SPEC, **_clean_addon_files()})
     reader = FakeGitHubClient(changed_files={17: [_SPEC_PATH]})
@@ -365,5 +383,7 @@ def test_handle_webhook_through_shadow_client_runs_but_posts_nothing(fake_client
     result = handle_webhook("pull_request", _intent_confirmed_payload(), orch, shadow)
     assert result is not None and result.status == "implemented"
     assert "speckit.implement" in [c["command"] for c in fake_client.commands]
-    assert shadow.comments and shadow.comments[0][0] == 17  # drafted
-    assert reader.comments == []  # but nothing sent to GitHub
+    # Success path: no comment drafted from handle_webhook (the composition
+    # root drafts it post-push). Reader stays empty regardless.
+    assert shadow.comments == []
+    assert reader.comments == []
