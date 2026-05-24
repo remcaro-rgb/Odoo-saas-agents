@@ -159,6 +159,32 @@ def apply_session_diff(
     if not pieces:
         return applied
     blob = "\n".join(pieces) + "\n"
+    # `Coder._sync_from_session` calls us once after the initial agent pass
+    # and again after each Gate-1 corrective retry. OpenCode's session diff
+    # is CUMULATIVE from session start, so the second-and-later applies hit
+    # a tree that already has some hunks of the same blob landed (from the
+    # prior sync). `git apply` is atomic — even one partial-already-applied
+    # hunk fails the whole batch. Reset each modified path to HEAD before
+    # the apply so the cumulative diff always lands on a clean baseline.
+    # Verified live 2026-05-24: PR #36 run 26346962399's diagnostic showed
+    # tests/__init__.py at the patch's AFTER state but models/* at BEFORE,
+    # confirming the partial-applied scenario.
+    modified_paths = [
+        str(entry.get("file") or "")
+        for entry in diffs
+        if str(entry.get("status", "")).lower() != "added"
+        and not is_protected_path(str(entry.get("file") or ""))
+        and str(entry.get("patch", "")).strip()
+    ]
+    if modified_paths:
+        # Best-effort reset — works only for TRACKED files at HEAD. Newly-
+        # added files are handled by the write-direct branch above and need
+        # no reset. If a path isn't in HEAD (e.g. a brand-new addon
+        # scaffolded in this session), `git checkout` errors silently.
+        _git(
+            workspace_root, "checkout", "HEAD", "--", *modified_paths,
+            check=False,
+        )
     try:
         # `-p0` keeps paths as-is. OpenCode's shadow-git unified diffs lack
         # the `a/` / `b/` header prefixes that `git diff` emits, so the
@@ -169,16 +195,11 @@ def apply_session_diff(
         # (Tier-7 follow-up).
         _git(workspace_root, "apply", "-p0", "--whitespace=nowarn", "-", stdin=blob)
     except subprocess.CalledProcessError:
-        # Forward apply failed — could be: (a) idempotent re-apply (the
-        # patch is already in the tree from `Coder._sync_from_session`'s
-        # earlier apply during the implement loop), or (b) a genuine
-        # mismatch. Reverse-check: if the patch IS already in the tree,
-        # `git apply --reverse --check` succeeds (no-op). Otherwise it
-        # fails — and BEFORE re-raising, dump the on-disk file bytes +
-        # the blob so the resulting CalledProcessError carries a real
-        # diagnostic in production logs. Without this, the only signal
-        # is the cryptic `patch failed: <file>:1` from git, which doesn't
-        # reveal WHICH bytes diverged from the patch's expected context.
+        # Forward apply STILL failed even after the reset — extremely
+        # unusual (suggests the patch's "before" context truly doesn't
+        # match HEAD's content). Reverse-check as a last-resort safety
+        # net; if it also fails, dump diagnostic state and re-raise so
+        # the workflow log carries usable info for human triage.
         try:
             _git(workspace_root, "apply", "-p0", "--reverse", "--check", "-", stdin=blob)
         except subprocess.CalledProcessError:
