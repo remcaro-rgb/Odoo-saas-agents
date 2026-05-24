@@ -278,7 +278,21 @@ def commit_and_push(
     if _git(workspace_root, "diff", "--cached", "--quiet", check=False).returncode == 0:
         return None
     _git(workspace_root, "commit", "-m", message)
-    _git(workspace_root, "push", push_url, f"HEAD:{branch}")
+    # `actions/checkout@v4` with `persist-credentials: true` (the default)
+    # installs a global `http.https://github.com/.extraheader` carrying the
+    # workflow's default `github-actions[bot]` token. That extraheader
+    # OVERRIDES the embedded `https://x-access-token:<App token>@github.com/`
+    # in our push_url — git reaches the server with the github-actions[bot]
+    # token, which lacks Contents:write, and the push returns
+    # `remote: Permission to <repo>.git denied to github-actions[bot]`.
+    # Suppressing the extraheader for this one command (via `-c`) lets the
+    # App installation token in the URL win. Verified live 2026-05-24 on
+    # PR #36 run 26347048257.
+    _git(
+        workspace_root,
+        "-c", "http.https://github.com/.extraheader=",
+        "push", push_url, f"HEAD:{branch}",
+    )
     return _git(workspace_root, "rev-parse", "HEAD").stdout.strip()
 
 
