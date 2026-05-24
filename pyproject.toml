@@ -12,6 +12,10 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.11",
+    "psycopg[binary]>=3.2",
+]
+postgres = [
+    "psycopg[binary]>=3.2",
 ]
 
 [build-system]
