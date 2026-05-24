@@ -1,0 +1,45 @@
+# Fly config for the agentlab Playwright shim.
+# DEPLOY: from this directory, `fly launch --name odoo-saas-odoo-agentlab-shim`.
+
+app = "odoo-saas-odoo-agentlab-shim"
+# Keep the region in sync with the agentlab app so cross-call latency is
+# single-digit ms. Edit before first launch if the agentlab moved.
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  # AGENTLAB_BASE_URL is set as a Fly secret (so it can be rotated without
+  # rebuilding the image). Default lives in main.py as a safety net.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Agentlab reproductions can take several minutes. Be generous on the
+  # idle timeout so Fly doesn't reap the request mid-Playwright.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0   # cost-optimized; bug intake is bursty.
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 4
+    hard_limit = 8
+
+[[vm]]
+  # Playwright + Chromium are memory-hungry. shared-cpu-2x with 2 GB is the
+  # minimum that does not OOM on a multi-step navigation.
+  size = "shared-cpu-2x"
+  memory = "2gb"
+  cpus = 2
+
+[checks]
+  [checks.healthz]
+    type = "http"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/healthz"

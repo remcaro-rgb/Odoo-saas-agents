@@ -76,6 +76,11 @@ class AgentConfig:
     # workflow contract is forward-stable.
     bot_token: str | None
     app_id: str | None
+    # Tier 4: the agentlab Playwright shim. When both are set the bug flow
+    # delegates to the shim. Unset = bug intakes fall back to human triage
+    # (the pre-Tier-4 safe posture).
+    agentlab_shim_url: str | None
+    agentlab_shim_token: str | None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AgentConfig:
@@ -94,6 +99,8 @@ class AgentConfig:
             slack_webhook_url=env.get("SLACK_WEBHOOK_URL") or None,
             bot_token=env.get("GH_TOKEN") or None,
             app_id=env.get("SPEC_GENERATOR_BOT_APP_ID") or None,
+            agentlab_shim_url=env.get("AGENTLAB_SHIM_URL") or None,
+            agentlab_shim_token=env.get("AGENTLAB_SHIM_TOKEN") or None,
         )
 
 
@@ -141,9 +148,34 @@ def build_orchestrator(
     *,
     decision: RolloutDecision = RolloutDecision.SHADOW,
 ) -> Orchestrator:
-    """Wire the spec-generator orchestrator over an OpenCode client."""
+    """Wire the spec-generator orchestrator over an OpenCode client.
+
+    The agentlab client is constructed here (Tier 4) so the orchestrator's
+    bug flow can attempt a real reproduction. ``None`` if either of the
+    shim env vars is unset — the bug flow then falls back to human triage.
+    """
+    agentlab = build_agentlab_client(config)
     return Orchestrator(
-        oc_client=client, shadow=decision is RolloutDecision.SHADOW
+        oc_client=client,
+        shadow=decision is RolloutDecision.SHADOW,
+        agentlab=agentlab,
+    )
+
+
+def build_agentlab_client(config: AgentConfig):
+    """Construct the agentlab HTTP shim client when both env vars are set.
+
+    Returns ``None`` otherwise. ``repro.HttpShimAgentlabClient`` is the
+    only concrete implementation today; the import is local so a future
+    `pip install agentlab[reproducer]` extras can lazily-load alternatives.
+    """
+    if not (config.agentlab_shim_url and config.agentlab_shim_token):
+        return None
+    from .repro import HttpShimAgentlabClient
+
+    return HttpShimAgentlabClient(
+        base_url=config.agentlab_shim_url,
+        token=config.agentlab_shim_token,
     )
 
 

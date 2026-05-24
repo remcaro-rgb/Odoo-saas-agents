@@ -155,3 +155,44 @@ def test_rollout_target_from_issue_payload():
 def test_rollout_target_falls_back_to_repo_when_no_issue():
     payload = {"repository": {"full_name": "o/r"}}
     assert app.rollout_target("ping", payload) == "o/r"
+
+
+# ---------------------------------------------------------------------------
+# Tier 4: AgentConfig + build_agentlab_client
+# ---------------------------------------------------------------------------
+
+def test_agent_config_loads_agentlab_shim_env_vars():
+    config = app.AgentConfig.from_env({
+        "DATA_PLANE_REPO": "o/r",
+        "AGENTLAB_SHIM_URL": "https://shim.example",
+        "AGENTLAB_SHIM_TOKEN": "tk-123",
+    })
+    assert config.agentlab_shim_url == "https://shim.example"
+    assert config.agentlab_shim_token == "tk-123"
+
+
+def test_build_agentlab_client_returns_none_without_env():
+    config = app.AgentConfig.from_env({"DATA_PLANE_REPO": "o/r"})
+    assert app.build_agentlab_client(config) is None
+
+
+def test_build_agentlab_client_returns_none_with_only_url():
+    config = app.AgentConfig.from_env({
+        "DATA_PLANE_REPO": "o/r",
+        "AGENTLAB_SHIM_URL": "https://shim.example",
+    })
+    assert app.build_agentlab_client(config) is None
+
+
+def test_build_agentlab_client_returns_http_shim_with_both_set():
+    from agents.spec_generator.repro import HttpShimAgentlabClient
+
+    config = app.AgentConfig.from_env({
+        "DATA_PLANE_REPO": "o/r",
+        "AGENTLAB_SHIM_URL": "https://shim.example",
+        "AGENTLAB_SHIM_TOKEN": "tk-123",
+    })
+    client = app.build_agentlab_client(config)
+    assert isinstance(client, HttpShimAgentlabClient)
+    assert client.base_url == "https://shim.example"
+    assert client.token == "tk-123"
