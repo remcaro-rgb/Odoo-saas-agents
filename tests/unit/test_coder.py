@@ -142,6 +142,41 @@ def test_implement_primes_the_session_with_odoo_context(fake_client):
     assert "widget.counter" in text
 
 
+def test_implement_runs_auto_isort_after_each_sync_from_session(fake_client):
+    """`/speckit.fix` appends `from . import test_<spec>` to an existing
+    `tests/__init__.py` as a separate statement instead of the
+    isort-canonical combined form — verified pattern on PR #36 (club_events,
+    run 26345910346) and PR #37 (account_ledger_report, run 26348491241),
+    each cost a Gate-1 escalation. `Coder.implement` runs
+    `workspace.auto_isort(addon_prefix)` after every `_sync_from_session`
+    so the I001 the agent introduces is auto-resolved BEFORE Gate-1's
+    lint check sees it.
+
+    Asserted on the clean path (1 sync) and on the corrective-retry path
+    (N+1 syncs for N retries) — both routes pull agent edits via
+    `_sync_from_session`, both should auto-isort right after."""
+    ws = InMemoryWorkspace(_clean_addon())
+    result = Coder(SpecKitDriver(fake_client), ws).implement(
+        "sess-1", "custom-addons/widget/"
+    )
+    assert result.status == "implemented"
+    # Auto-isort was called at least once — after the initial sync.
+    assert ws.auto_isort_calls == ["custom-addons/widget/"]
+
+
+def test_implement_corrective_retries_each_trigger_auto_isort(fake_client):
+    """Every corrective retry pulls fresh agent edits via
+    `_sync_from_session`, so each retry must also `auto_isort` so the
+    next-iteration Gate-1 / validate_odoo sees a lint-canonical tree."""
+    ws = InMemoryWorkspace(_dirty_addon())
+    Coder(SpecKitDriver(fake_client), ws, max_retries=2).implement(
+        "sess-1", "custom-addons/widget/"
+    )
+    # Initial + 2 corrective retries = 3 syncs = 3 auto_isort calls,
+    # all on the same addon prefix.
+    assert ws.auto_isort_calls == ["custom-addons/widget/"] * 3
+
+
 def test_implement_initializes_git_project_before_first_llm_call(fake_client):
     """OpenCode's shadow-git snapshot tracker is gated on `state.vcs === "git"`;
     until `POST /project/git/init?directory=/workspace` runs, snapshots

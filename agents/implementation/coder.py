@@ -173,7 +173,7 @@ class Coder:
             for path in self.workspace.list_files(addon_prefix)
         }
 
-    def _sync_from_session(self, session_id: str) -> int:
+    def _sync_from_session(self, session_id: str, addon_prefix: str) -> int:
         """Pull OpenCode's session diff into `self.workspace` so the next
         `validate_odoo` / Gate-1 reads what the agent *actually* wrote.
 
@@ -181,9 +181,20 @@ class Coder:
         workspace; the Action-side validation sees the unchanged tree and the
         loop short-circuits to "implemented" before any real work happens
         (runbook §7, Tier-4 sync fix).
+
+        After the apply, auto-resolves any `I001` import-order debt the agent
+        introduced via `workspace.auto_isort(addon_prefix)` — the LLM
+        consistently appends `from . import test_<spec>` to existing
+        `tests/__init__.py` as a separate statement instead of the
+        isort-canonical combined form, which tripped Gate-1's lint check
+        and escalated runs on PR #36 + PR #37 before this hook existed.
+        Only `--select I` (isort) is auto-fixed — broader auto-fixes
+        could change semantic behaviour and require human review.
         """
         diffs = self.driver.client.get_diff(session_id) or []
-        return self.workspace.apply_session_diff(diffs)
+        applied = self.workspace.apply_session_diff(diffs)
+        self.workspace.auto_isort(addon_prefix)
+        return applied
 
     def implement(
         self,
@@ -248,7 +259,7 @@ class Coder:
         # spec `spec_text=""` and /implement reads the planning artifacts.
         _drive(spec_text)
         # Sync OpenCode's writes into self.workspace BEFORE validation sees them.
-        self._sync_from_session(session_id)
+        self._sync_from_session(session_id, addon_prefix)
 
         for attempt in range(self.max_retries + 1):
             findings = validate_odoo(self._addon_files(addon_prefix))
@@ -275,5 +286,5 @@ class Coder:
             # the whole loop.
             _drive(correction, model=self.frontier_model)
             # Sync the corrective writes before the next attempt's validation.
-            self._sync_from_session(session_id)
+            self._sync_from_session(session_id, addon_prefix)
         raise AssertionError("unreachable")  # pragma: no cover

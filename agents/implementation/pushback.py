@@ -127,7 +127,6 @@ def apply_session_diff(
     """
     if not diffs:
         return 0
-    pieces: list[str] = []
     applied = 0
     for entry in diffs:
         path = str(entry.get("file") or "")
@@ -154,58 +153,64 @@ def apply_session_diff(
                 fh.write(content + ("\n" if not content.endswith("\n") else ""))
             applied += 1
             continue
-        pieces.append(patch)
-        applied += 1
-    if not pieces:
-        return applied
-    blob = "\n".join(pieces) + "\n"
-    # `Coder._sync_from_session` calls us once after the initial agent pass
-    # and again after each Gate-1 corrective retry. OpenCode's session diff
-    # is CUMULATIVE from session start, so the second-and-later applies hit
-    # a tree that already has some hunks of the same blob landed (from the
-    # prior sync). `git apply` is atomic — even one partial-already-applied
-    # hunk fails the whole batch. Reset each modified path to HEAD before
-    # the apply so the cumulative diff always lands on a clean baseline.
-    # Verified live 2026-05-24: PR #36 run 26346962399's diagnostic showed
-    # tests/__init__.py at the patch's AFTER state but models/* at BEFORE,
-    # confirming the partial-applied scenario.
-    modified_paths = [
-        str(entry.get("file") or "")
-        for entry in diffs
-        if str(entry.get("status", "")).lower() != "added"
-        and not is_protected_path(str(entry.get("file") or ""))
-        and str(entry.get("patch", "")).strip()
-    ]
-    if modified_paths:
-        # Best-effort reset — works only for TRACKED files at HEAD. Newly-
-        # added files are handled by the write-direct branch above and need
-        # no reset. If a path isn't in HEAD (e.g. a brand-new addon
-        # scaffolded in this session), `git checkout` errors silently.
-        _git(
-            workspace_root, "checkout", "HEAD", "--", *modified_paths,
-            check=False,
-        )
-    try:
-        # `-p0` keeps paths as-is. OpenCode's shadow-git unified diffs lack
-        # the `a/` / `b/` header prefixes that `git diff` emits, so the
-        # default `-p1` strips the first segment off (e.g.
-        # `custom-addons/x/__manifest__.py` -> `x/__manifest__.py`) and the
-        # apply fails with `No such file or directory`. Verified live
-        # 2026-05-23 against probe session ses_1a8f4c29effeUMS10Ho63UvuQ9
-        # (Tier-7 follow-up).
-        _git(workspace_root, "apply", "-p0", "--whitespace=nowarn", "-", stdin=blob)
-    except subprocess.CalledProcessError:
-        # Forward apply STILL failed even after the reset — extremely
-        # unusual (suggests the patch's "before" context truly doesn't
-        # match HEAD's content). Reverse-check as a last-resort safety
-        # net; if it also fails, dump diagnostic state and re-raise so
-        # the workflow log carries usable info for human triage.
-        try:
-            _git(workspace_root, "apply", "-p0", "--reverse", "--check", "-", stdin=blob)
-        except subprocess.CalledProcessError:
-            _dump_apply_failure_state(workspace_root, diffs, blob)
-            raise
+        if _apply_one_modify(workspace_root, path, patch, entry):
+            applied += 1
     return applied
+
+
+def _apply_one_modify(
+    workspace_root: str,
+    path: str,
+    patch: str,
+    entry: dict[str, Any],
+) -> bool:
+    """Apply ONE modify patch independently. Returns True if landed (or
+    already-in-tree), False if phantom-skipped.
+
+    Per-patch (not blob) for resilience to OpenCode's session-diff baseline
+    quirk: the session diff's BEFORE side reflects /workspace state when
+    the LLM's first step started (PRE-provisioning leftovers from any
+    previous session), NOT the PR head SHA the Action runner checked out.
+    A blob-apply aborts atomically on any single hunk mismatch, so one
+    phantom patch from pre-provisioning leftovers used to take legitimate
+    co-bundled patches down with it. Per-patch lets the legit ones land
+    while the phantom ones skip with a warning.
+
+    Strategy: reset path to HEAD, try forward apply; on fail try
+    reverse-check (idempotent already-applied case); on both fail log +
+    skip. Never raises — phantom patches are an expected outcome of
+    OpenCode's diff semantics, not a fatal error.
+    """
+    # Reset the file to HEAD so the patch lands on a clean baseline. Works
+    # only for tracked files; brand-new paths error silently (check=False).
+    _git(workspace_root, "checkout", "HEAD", "--", path, check=False)
+    blob = patch + "\n"
+    try:
+        # `-p0` keeps paths as-is — OpenCode's headers carry no `a/`/`b/`
+        # prefix. See the module-level docstring + commit `b55f340`.
+        _git(workspace_root, "apply", "-p0", "--whitespace=nowarn", "-", stdin=blob)
+        return True
+    except subprocess.CalledProcessError:
+        pass
+    # Forward apply failed. Idempotent already-applied? Reverse-check.
+    try:
+        _git(
+            workspace_root, "apply", "-p0", "--reverse", "--check", "-",
+            stdin=blob,
+        )
+        return True  # Patch already in tree — no-op, but count as landed.
+    except subprocess.CalledProcessError:
+        pass
+    # Both directions failed → phantom patch (BEFORE doesn't match HEAD,
+    # AFTER doesn't match current state). The agent's intended change for
+    # this file isn't recoverable from this cumulative session diff.
+    # Log to stderr (workflow log) and skip — do NOT raise. Verified on
+    # PR #37 run 26348556180: agent's diff for models/account_ledger_report.py
+    # expected `tools.SQL(...)` BEFORE, but HEAD has `"""..."""`. Pre-
+    # provisioning leftovers from a prior session anchored the diff
+    # baseline.
+    _dump_apply_failure_state(workspace_root, [entry], blob)
+    return False
 
 
 def _dump_apply_failure_state(

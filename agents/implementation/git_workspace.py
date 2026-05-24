@@ -107,3 +107,32 @@ class GitWorkspace:
         entry was either patch-less or targeted a guardrail path).
         """
         return _apply_session_diff_to_root(str(self.root), diffs)
+
+    def auto_isort(self, prefix: str) -> None:
+        """Run ``ruff check --select I --fix`` against ``<root>/<prefix>``.
+
+        Auto-resolves the `I001 [*] Import block is un-sorted or
+        un-formatted` debt the agent introduces when it appends a new
+        `from . import test_<spec>` line to an existing `tests/__init__.py`
+        as a separate statement instead of the isort-canonical combined
+        form. Reproducible pattern on PR #36 (club_events) and PR #37
+        (account_ledger_report) — each cost a Gate-1 escalation.
+
+        Best-effort: any ruff failure is logged and swallowed (Gate-1's
+        own lint check would catch a real lint problem on the next pass).
+        Only `--select I` (isort) is auto-fixed — broader auto-fixes could
+        change semantic behaviour and require human review.
+        """
+        target = self.root / prefix
+        if not target.exists():
+            return None
+        try:
+            subprocess.run(
+                ["ruff", "check", "--select", "I", "--fix", str(target)],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            # `ruff` not installed (dev env, smoke tests). Gate-1's own
+            # lint check would have caught this anyway; no-op gracefully.
+            pass
+        return None

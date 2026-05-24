@@ -41,6 +41,7 @@ class Workspace(Protocol):
     def commit(self, paths: Iterable[str], message: str) -> str: ...
     def escalate(self, reason: str, details: str = "") -> None: ...
     def apply_session_diff(self, diffs: list[dict[str, Any]]) -> int: ...
+    def auto_isort(self, prefix: str) -> None: ...
 
 
 class InMemoryWorkspace:
@@ -51,6 +52,7 @@ class InMemoryWorkspace:
         self.branch: str | None = None
         self.commits: list[Commit] = []
         self.escalations: list[Escalation] = []
+        self.auto_isort_calls: list[str] = []  # prefixes seen by auto_isort
 
     def checkout(self, branch: str) -> None:
         self.branch = branch
@@ -75,6 +77,21 @@ class InMemoryWorkspace:
 
     def escalate(self, reason: str, details: str = "") -> None:
         self.escalations.append(Escalation(reason, details))
+
+    def auto_isort(self, prefix: str) -> None:
+        """No-op in the in-memory workspace, but records the call so unit
+        tests can assert `Coder.implement` invoked it after each sync.
+
+        `GitWorkspace.auto_isort` runs `ruff check --select I --fix` against
+        the worktree to auto-resolve `I001` import-order debt the agent
+        introduces when appending lines to an existing `__init__.py`
+        (verified pattern from PR #36 / PR #37). In-memory tests don't
+        exercise the actual ruff invocation — that's the GitWorkspace
+        integration test's job; here we just track that `Coder.implement`
+        made the call at the right times.
+        """
+        self.auto_isort_calls.append(prefix)
+        return None
 
     def apply_session_diff(self, diffs: list[dict[str, Any]]) -> int:
         """Pull OpenCode's session-diff payload into the in-memory store.

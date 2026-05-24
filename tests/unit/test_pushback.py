@@ -294,6 +294,54 @@ def test_apply_session_diff_is_idempotent_when_patch_already_applied(tmp_path):
     assert (tmp_path / "synced.txt").read_text() == "agent-write\n"
 
 
+def test_apply_session_diff_skips_phantom_patches_with_stale_baseline(tmp_path):
+    """When OpenCode's session-diff baseline is taken BEFORE provisioning
+    runs in the LLM step (which it is — verified on PR #37 run
+    26348556180), the cumulative diff's BEFORE side reflects pre-session
+    leftovers, not HEAD. Patches in this state are "phantom": the BEFORE
+    bytes don't match HEAD content AND aren't already in the tree's
+    AFTER state either. Without phantom-skip the entire `git apply`
+    blob aborts and a legitimate co-bundled patch never lands.
+
+    Per-patch behavior: phantom patches are SKIPPED with a stderr warning;
+    legitimate patches in the same batch still apply. Total `applied`
+    counts only the patches that actually landed (not phantom-skips).
+
+    Reproduces PR #37's failure mode: agent's patch wanted to change
+    `tools.SQL(...)` -> `\"\"\"...\"\"\"`, but the runner's HEAD already
+    had `\"\"\"...\"\"\"` (the `tools.SQL(...)` form never existed on HEAD).
+    """
+    _init_repo(tmp_path)
+    # File on disk = "current content"; patch's BEFORE references the
+    # "old content" that NEVER existed at HEAD — phantom.
+    (tmp_path / "real.txt").write_text("real on disk\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "real.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "real"], check=True)
+    phantom_patch = (
+        "Index: real.txt\n"
+        "===================================================================\n"
+        "--- real.txt\t\n"
+        "+++ real.txt\t\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old content that was never on disk\n"
+        "+new agent edit\n"
+    )
+    # Also include a legitimate modify in the same batch.
+    legit_patch = _generate_patch(tmp_path, "initial.txt", "initial\nappended\n")
+    applied = apply_session_diff(
+        str(tmp_path),
+        [
+            {"file": "real.txt", "patch": phantom_patch, "status": "modified"},
+            {"file": "initial.txt", "patch": legit_patch, "status": "modified"},
+        ],
+    )
+    # The legit patch lands; the phantom skips.
+    assert applied == 1
+    assert (tmp_path / "initial.txt").read_text() == "initial\nappended\n"
+    # Phantom file UNTOUCHED (kept HEAD content).
+    assert (tmp_path / "real.txt").read_text() == "real on disk\n"
+
+
 def test_apply_session_diff_filters_protected_paths(tmp_path):
     """A diff entry targeting a guardrail path is dropped before git apply
     runs — defense in depth on top of provisioning's sparse-checkout."""
