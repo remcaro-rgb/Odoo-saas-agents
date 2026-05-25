@@ -6,8 +6,11 @@
 --
 -- One row per indexed document. The ingest cron walks
 -- docs/superpowers/specs/**/*.md plus currently-open GitHub issues, embeds
--- the title + first ~500 chars of body via `text-embedding-3-small`
--- (1536 dimensions), and upserts.
+-- the title + first ~500 chars of body via the self-hosted embeddings shim
+-- (`BAAI/bge-small-en-v1.5`, 384 dimensions), and upserts. The agent's
+-- composition root can also fall back to OpenAI's `text-embedding-3-small`
+-- but that ALSO has to return 384-d vectors (use OpenAI's `dimensions: 384`
+-- request param to downscale).
 --
 -- Read path: the agent (PgvectorKnowledgeBase) computes the embedding for a
 -- new intake, then runs `ORDER BY embedding <=> $query ASC LIMIT 3` (cosine
@@ -30,7 +33,7 @@ CREATE TABLE IF NOT EXISTS spec_gen_embeddings (
     -- The string we actually embed — useful for debugging "why did this
     -- score this way" without re-fetching the source document.
     embed_text  TEXT NOT NULL,
-    embedding   VECTOR(1536) NOT NULL,
+    embedding   VECTOR(384) NOT NULL,
     refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

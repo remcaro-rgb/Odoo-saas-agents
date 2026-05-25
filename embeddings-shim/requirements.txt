@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+# Pin sentence-transformers + matching torch (CPU build) so the image is reproducible.
+# torch is the big chunk (~200 MB) — install from the CPU index to skip CUDA libs.
+sentence-transformers>=3.0,<4
+torch==2.4.1+cpu --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.19.1+cpu --index-url https://download.pytorch.org/whl/cpu
