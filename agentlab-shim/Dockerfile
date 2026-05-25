@@ -1,6 +1,9 @@
 # Playwright base image — bundles Chromium + system deps.
-# Pin to a specific tag so a future Playwright bump doesn't surprise us.
-FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
+# Keep this tag pinned to match the `playwright` pip version in
+# requirements.txt — a mismatch surfaces as an `Executable doesn't exist`
+# error in the runner (canary #59 on 2026-05-24 caught a v1.42 image
+# against a v1.60 pip install).
+FROM mcr.microsoft.com/playwright/python:v1.60.0-jammy
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
