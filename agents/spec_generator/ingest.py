@@ -254,3 +254,11 @@ __all__ = [
     "main",
     "run_ingest",
 ]
+
+
+if __name__ == "__main__":
+    # `python -m agents.spec_generator.ingest` — the cron workflow's entry
+    # point. Without this guard the module imports cleanly + exits 0 with
+    # no work done (caught live on 2026-05-25 ingest run 26382803631 —
+    # 460ms exit, zero stdout).
+    raise SystemExit(main())
