@@ -93,3 +93,121 @@ class Budget:
 
     def record(self, *, amount_usd: float, when: datetime | None = None) -> None:
         self.ledger.record(amount_usd=amount_usd, when=when)
+
+
+class PostgresCostLedger:
+    """`CostLedger` backed by ``spec_generator_runs.cost_usd`` on the
+    control-plane Postgres.
+
+    `spent_since` sums every row whose ``updated_at`` falls inside the
+    rolling 7-day window. `record(amount_usd, when)` is a fire-and-forget
+    UPDATE — the Tier 3 `PostgresRunStore.record_cost` is the canonical
+    write path for actually adding cost to a row, this method writes to
+    a single synthetic "sentinel" issue used purely for testing /
+    backstop tracking when we don't have a per-issue ledger.
+
+    Like other Postgres-backed stores in this package, errors are
+    swallowed + logged: a control-plane outage degrades the spend gate
+    to "no cap" (admit by default) rather than refusing every draft.
+    """
+
+    #: Synthetic issue_number used by the standalone `record()` write.
+    #: Real per-issue costs are recorded via `PostgresRunStore.record_cost`
+    #: which keyes on the actual GitHub issue number.
+    SENTINEL_ISSUE = -1
+
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+
+    def _connect(self):  # noqa: ANN202  (psycopg.Connection requires the runtime import)
+        import psycopg
+
+        return psycopg.connect(self.dsn, autocommit=True)
+
+    def spent_since(self, since: datetime) -> float:
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0)::float "
+                    "FROM spec_generator_runs "
+                    "WHERE updated_at >= %s",
+                    (since,),
+                )
+                row = cur.fetchone()
+                return float(row[0]) if row and row[0] is not None else 0.0
+        except Exception as exc:  # noqa: BLE001
+            import sys
+            print(
+                f"warning: PostgresCostLedger.spent_since failed: {exc}",
+                file=sys.stderr, flush=True,
+            )
+            return 0.0
+
+    def record(self, *, amount_usd: float, when: datetime | None = None) -> None:
+        """Record cost against the SENTINEL issue.
+
+        In production the orchestrator uses
+        ``PostgresRunStore.record_cost(issue, amount)`` to attribute spend
+        to the originating GitHub issue. This method is a backstop for
+        standalone tests and for tracking spend that has no natural
+        issue parent (e.g. the ingest cron's OpenAI embedding calls).
+        """
+        sql = (
+            "INSERT INTO spec_generator_runs "
+            "  (issue_number, kind, confidence, branch, spec_path, "
+            "   cost_usd, phase) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (issue_number) DO UPDATE SET "
+            "  cost_usd = spec_generator_runs.cost_usd + EXCLUDED.cost_usd"
+        )
+        params = (
+            self.SENTINEL_ISSUE, "sentinel", 0.0,
+            "agent/sentinel", "docs/sentinel.md",
+            float(amount_usd), "completed",
+        )
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            import sys
+            print(
+                f"warning: PostgresCostLedger.record failed: {exc}",
+                file=sys.stderr, flush=True,
+            )
+
+
+def build_budget(env: dict[str, str]) -> Budget | None:
+    """Composition-root helper. Picks the cost ledger by env:
+
+    1. ``CONTROL_PLANE_PG_DSN`` set + psycopg importable -> Postgres ledger.
+    2. Otherwise ``None`` — the orchestrator skips the spend cap.
+
+    ``SPEC_GEN_WEEKLY_CAP_USD`` overrides the default ``$50``.
+    """
+    dsn = (env.get("CONTROL_PLANE_PG_DSN") or "").strip()
+    if not dsn:
+        return None
+    try:
+        import psycopg  # noqa: F401
+    except ImportError:
+        import sys
+        print(
+            "warning: CONTROL_PLANE_PG_DSN set but psycopg unavailable; "
+            "spend cap disabled",
+            file=sys.stderr, flush=True,
+        )
+        return None
+    cap = float(env.get("SPEC_GEN_WEEKLY_CAP_USD") or DEFAULT_WEEKLY_CAP_USD)
+    return Budget(ledger=PostgresCostLedger(dsn), weekly_cap_usd=cap)
+
+
+__all__ = [
+    "Budget",
+    "CostLedger",
+    "DEFAULT_WEEKLY_CAP_USD",
+    "InMemoryCostLedger",
+    "PostgresCostLedger",
+    "SpendDecision",
+    "WARN_FRACTION",
+    "build_budget",
+]

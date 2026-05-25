@@ -39,6 +39,7 @@ from agents.implementation.rollout import Rollout, RolloutDecision
 
 from .axiom_sink import maybe_build_axiom_sink
 from .core import DraftResult, Orchestrator
+from .cost import build_budget
 from .embedding import build_embedding_client
 from .github_io import (
     GhCliIssueClient,
@@ -166,11 +167,13 @@ def build_orchestrator(
     env_map = dict(env or os.environ)
     embedder = build_embedding_client(env_map)
     knowledge_base = build_knowledge_base(env_map, embedder)
+    budget = build_budget(env_map)
     return Orchestrator(
         oc_client=client,
         shadow=decision is RolloutDecision.SHADOW,
         agentlab=agentlab,
         knowledge_base=knowledge_base,
+        budget=budget,
     )
 
 
