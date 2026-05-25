@@ -26,8 +26,24 @@ from typing import Protocol, runtime_checkable
 
 from .intake import Intake
 
-# The threshold from the plan §3 Tier 5 (cosine >= 0.85 to top hit).
-DUPLICATE_THRESHOLD = 0.85
+# Cosine-similarity threshold to call something a duplicate.
+#
+# The plan §3 Tier 5 originally specified 0.85, which was calibrated for
+# OpenAI text-embedding-3-* models. We migrated to a self-hosted
+# `BAAI/bge-small-en-v1.5` shim on 2026-05-24 (see embeddings-shim/),
+# which has a different similarity distribution: topically-related pairs
+# score 0.5-0.8, with 0.85+ reserved for essentially-identical text.
+#
+# Calibration data — first canary on 2026-05-25:
+#   query #54 ("Add bulk-archive action to /partner list")
+#     top hit #47 ("Add CSV export to sale orders list") → 0.6653
+#   query #67 ("Add CSV export from /partner list")
+#     top hit #47 → ~0.66 (inferred)
+#
+# 0.65 catches the obvious near-dups; tune up to 0.70-0.75 if false-
+# positives become noisy. The plan's "tune from the first 100 runs"
+# note (§3 Tier 5) anticipated this exact step.
+DUPLICATE_THRESHOLD = 0.65
 
 # Cap on how many candidate dups we surface (more than this is noise).
 TOP_K_CANDIDATES = 3
