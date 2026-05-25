@@ -35,6 +35,13 @@ from .commenter import (
 )
 from .cost import Budget
 from .drafter import DraftedSpec, Drafter
+from .dup_detector import (
+    DuplicateDetector,
+    DuplicateResult,
+    KnowledgeBase,
+    render_duplicate_callout,
+    title_prefix_for,
+)
 from .events import Event, EventType
 from .intake import Intake, IntakeBuilder
 from .prompt_injection import scan as scan_injection
@@ -119,6 +126,7 @@ class Orchestrator:
         refiner: Refiner | None = None,
         agentlab: AgentlabClient | None = None,
         budget: Budget | None = None,
+        knowledge_base: KnowledgeBase | None = None,
         shadow: bool = True,
     ) -> None:
         self.oc = oc_client
@@ -129,6 +137,12 @@ class Orchestrator:
         self.refiner = refiner or Refiner(driver=self.driver)
         self.reproducer = Reproducer(agentlab) if agentlab is not None else None
         self.budget = budget
+        # Tier 5 dup detector — `None` when the KB / embedding client isn't
+        # provisioned in this deployment. The orchestrator skips dup-check
+        # in that case (the pre-Tier-5 safe posture).
+        self.dup_detector = (
+            DuplicateDetector(kb=knowledge_base) if knowledge_base is not None else None
+        )
         self.shadow = shadow
 
     def refine(
@@ -387,6 +401,25 @@ class Orchestrator:
     def _draft_feature(
         self, intake: Intake, kind: KindResult, *, model: str | None
     ) -> DraftResult:
+        # Tier 5 dup detection — runs BEFORE the OpenCode draft so a clear
+        # duplicate at ≥ 0.85 cosine still gets a spec PR (the reporter may
+        # disagree with the detector) but the PR title is prefixed
+        # ``[possible-dup]`` and a callout linking the original is appended
+        # to the spec body. Skipped silently when no KB is wired.
+        dup_result: DuplicateResult | None = None
+        if self.dup_detector is not None:
+            try:
+                dup_result = self.dup_detector.detect(intake)
+            except Exception as exc:  # noqa: BLE001
+                # Detector failures must never block drafting — they
+                # downgrade silently. The note surfaces in the audit log.
+                dup_result = None
+                _dup_failure_note = f"dup detector raised {type(exc).__name__}: {exc}"
+            else:
+                _dup_failure_note = ""
+        else:
+            _dup_failure_note = ""
+
         session = self.oc.create_session(title=f"spec-gen/{intake.issue}")
         try:
             drafted = self.drafter.draft_design_spec(
@@ -422,6 +455,17 @@ class Orchestrator:
                 labels=[("issue", "needs-human")],
                 notes=["/speckit.specify produced empty output"],
             )
+
+        # Tier 5 dup result -> body callout + title prefix on the drafted spec.
+        if dup_result is not None and dup_result.candidates:
+            callout = render_duplicate_callout(dup_result)
+            if callout:
+                # Prepend the callout to the spec body so reviewers see it
+                # at the top of the PR diff. Two newlines preserve markdown.
+                drafted.body = callout + "\n\n" + drafted.body
+            prefix = title_prefix_for(dup_result)
+            if prefix:
+                drafted.title_prefix = prefix
 
         comments: list[tuple[str, str]] = [(
             "issue",

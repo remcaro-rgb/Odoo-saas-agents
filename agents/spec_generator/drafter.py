@@ -30,6 +30,9 @@ class DraftedSpec:
     `branch` is the `agent/spec-<issue>-<slug>` branch the spec PR will live
     on. `path` is the repo-relative file path under `docs/superpowers/specs/`.
     `captured_items` and `open_questions` feed the bot's summary comment.
+    `title_prefix` (Tier 5) is the optional tag the dup detector prepends —
+    e.g. ``[possible-dup]``; ``app._intake_title_from_result`` picks it up
+    when building the PR title.
     """
 
     issue: int
@@ -39,6 +42,7 @@ class DraftedSpec:
     captured_items: tuple[str, ...]
     open_questions: tuple[str, ...]
     session_id: str | None
+    title_prefix: str = ""
 
 
 def _render_fix_brief(intake: Intake, repro: ReproResult) -> str:

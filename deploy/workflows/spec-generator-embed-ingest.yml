@@ -1,0 +1,58 @@
+# Spec Generator Agent — embedding-index ingest (Tier 5, cron).
+#
+# DEPLOY TARGET: copy into the DATA-PLANE repo's `.github/workflows/`.
+# INERT in this repo (not under `.github/`).
+#
+# Daily walk of docs/superpowers/specs/**/*.md + open GitHub issues. Embeds
+# each via OpenAI text-embedding-3-small and UPSERTs into the
+# spec_gen_embeddings table on the control-plane Postgres.
+name: Spec Generator - embedding ingest
+
+on:
+  schedule:
+    # 10:00 UTC daily — runs one hour after the sweep cron so the two
+    # don't fight over Postgres connections (the sweep at 09:00 UTC takes
+    # under a minute; the embed ingest is a few minutes).
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read   # reads docs/superpowers/specs/**
+  issues: read     # gh issue list
+
+concurrency:
+  group: spec-gen-embed-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the data-plane repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Spec Generator + Postgres extra
+        run: pip install "git+https://github.com/remcaro-rgb/Odoo-saas-agents.git@${{ vars.AGENT_REF || 'main' }}#egg=odoo-saas-agents[postgres]"
+
+      - name: Run the ingest
+        env:
+          DATA_PLANE_REPO: ${{ github.repository }}
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          # OPENAI_API_KEY drives the embeddings; CONTROL_PLANE_PG_DSN is
+          # the same DSN the Tier 3 state writer uses.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONTROL_PLANE_PG_DSN: ${{ secrets.CONTROL_PLANE_PG_DSN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Observability — same Axiom pair as the other workflows.
+          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
+          AXIOM_DATASET: ${{ vars.AXIOM_DATASET }}
+        run: python -m agents.spec_generator.ingest
