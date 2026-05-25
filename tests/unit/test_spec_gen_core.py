@@ -168,3 +168,101 @@ def test_classifier_kind_result_is_threaded_into_result(opencode_with_specify_re
     result = orch.draft_spec(_evt(kind_hint="feature-request"))
     assert isinstance(result.kind, KindResult)
     assert result.kind.kind is IntakeKind.FEATURE
+
+
+# ---------------------------------------------------------------------------
+# Tier 5: orchestrator threads dup-detection results into the drafted spec
+# ---------------------------------------------------------------------------
+
+def test_dup_detector_threads_callout_and_title_prefix(opencode_with_specify_reply):
+    """When the dup detector returns a high-score candidate, the drafted
+    spec body grows a callout AND the drafted title_prefix carries
+    `[possible-dup]` (consumed by `_intake_title_from_result` in app.py)."""
+    from agents.spec_generator.dup_detector import (
+        BagOfWordsKnowledgeBase,
+        DuplicateCandidate,
+    )
+
+    kb = BagOfWordsKnowledgeBase()
+    # Seed with a near-identical existing spec so cosine >= 0.85 fires.
+    kb.add(
+        DuplicateCandidate(
+            kind="spec",
+            ref="docs/superpowers/specs/2026-01-01-csv-export-design.md",
+            title="Existing CSV export spec",
+            score=0.0,
+        ),
+        text="Add CSV export Please add a CSV download for sale orders",
+    )
+    orch = Orchestrator(
+        oc_client=opencode_with_specify_reply, knowledge_base=kb,
+    )
+    result = orch.draft_spec(_evt(kind_hint="feature-request"))
+    assert result.status == "drafted"
+    assert result.drafted is not None
+    # Title prefix lands so app.py can prepend it to the PR title.
+    assert result.drafted.title_prefix == "[possible-dup]"
+    # Callout sits at the top of the drafted body for reviewers.
+    assert "Possible duplicates" in result.drafted.body
+    assert "2026-01-01-csv-export-design.md" in result.drafted.body
+
+
+def test_dup_detector_skipped_silently_without_kb(opencode_with_specify_reply):
+    """No KB wired -> no dup-detection attempted, no errors, normal draft."""
+    orch = Orchestrator(oc_client=opencode_with_specify_reply)
+    result = orch.draft_spec(_evt(kind_hint="feature-request"))
+    assert result.status == "drafted"
+    assert result.drafted is not None
+    assert result.drafted.title_prefix == ""
+    assert "Possible duplicates" not in result.drafted.body
+
+
+def test_dup_detector_below_threshold_renders_callout_no_prefix(
+    opencode_with_specify_reply,
+):
+    """A weak match (< 0.85) shows the candidate as a suggestion in the
+    body, but the title is NOT prefixed (reporter judges)."""
+    from agents.spec_generator.dup_detector import (
+        BagOfWordsKnowledgeBase,
+        DuplicateCandidate,
+    )
+
+    kb = BagOfWordsKnowledgeBase()
+    # Loose lexical overlap — cosine well below 0.85.
+    kb.add(
+        DuplicateCandidate(
+            kind="open_issue",
+            ref="o/r#7",
+            title="Unrelated tangent",
+            score=0.0,
+        ),
+        text="Completely different words about CSV maybe",
+    )
+    orch = Orchestrator(
+        oc_client=opencode_with_specify_reply, knowledge_base=kb,
+    )
+    result = orch.draft_spec(_evt(kind_hint="feature-request"))
+    assert result.drafted is not None
+    # No prefix even though a candidate appeared.
+    assert result.drafted.title_prefix == ""
+    # Callout still rendered (so the reporter sees the suggestion).
+    assert "Possible duplicates" in result.drafted.body
+
+
+def test_dup_detector_exception_does_not_block_draft(
+    opencode_with_specify_reply, monkeypatch,
+):
+    """A KB failure must not block the drafter — draft proceeds without a callout."""
+    from agents.spec_generator.dup_detector import KnowledgeBase
+
+    class _BoomKB:
+        def query(self, text, *, top_k=3):
+            raise RuntimeError("kb down")
+
+    kb: KnowledgeBase = _BoomKB()  # type: ignore[assignment]
+    orch = Orchestrator(oc_client=opencode_with_specify_reply, knowledge_base=kb)
+    result = orch.draft_spec(_evt(kind_hint="feature-request"))
+    assert result.status == "drafted"
+    assert result.drafted is not None
+    assert result.drafted.title_prefix == ""
+    assert "Possible duplicates" not in result.drafted.body

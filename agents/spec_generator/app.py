@@ -39,12 +39,14 @@ from agents.implementation.rollout import Rollout, RolloutDecision
 
 from .axiom_sink import maybe_build_axiom_sink
 from .core import DraftResult, Orchestrator
+from .embedding import build_embedding_client
 from .github_io import (
     GhCliIssueClient,
     IssueClient,
     ShadowIssueClient,
     handle_webhook,
 )
+from .pgvector_kb import build_knowledge_base
 from .pushback import push_spec
 from .run_store import (
     PHASE_ESCALATED,
@@ -147,18 +149,28 @@ def build_orchestrator(
     client: OpenCodeClient,
     *,
     decision: RolloutDecision = RolloutDecision.SHADOW,
+    env: Mapping[str, str] | None = None,
 ) -> Orchestrator:
     """Wire the spec-generator orchestrator over an OpenCode client.
 
     The agentlab client is constructed here (Tier 4) so the orchestrator's
     bug flow can attempt a real reproduction. ``None`` if either of the
     shim env vars is unset — the bug flow then falls back to human triage.
+
+    Tier 5 dup detection: when both ``OPENAI_API_KEY`` and
+    ``CONTROL_PLANE_PG_DSN`` are set we wire a ``PgvectorKnowledgeBase``
+    so the feature flow can flag possible duplicates. Either unset
+    silently downgrades dup detection to a no-op.
     """
     agentlab = build_agentlab_client(config)
+    env_map = dict(env or os.environ)
+    embedder = build_embedding_client(env_map)
+    knowledge_base = build_knowledge_base(env_map, embedder)
     return Orchestrator(
         oc_client=client,
         shadow=decision is RolloutDecision.SHADOW,
         agentlab=agentlab,
+        knowledge_base=knowledge_base,
     )
 
 
@@ -308,7 +320,7 @@ def run(env: Mapping[str, str] | None = None, *, log: EventLog | None = None) ->
     # the push happens *after* outcome and is reported separately.
     handle_start = time.monotonic()
     try:
-        orchestrator = build_orchestrator(config, client, decision=decision)
+        orchestrator = build_orchestrator(config, client, decision=decision, env=env)
         github = build_github(config.data_plane_repo, decision)
         sessions = build_session_store(config)
         run_store = build_run_store_from_env(config, sessions, env)
@@ -528,13 +540,20 @@ def _record_iteration_state(
 
 
 def _intake_title_from_result(result: DraftResult) -> str:
-    """Best-effort title for the PR — falls back to a generic if unknown."""
+    """Best-effort title for the PR — falls back to a generic if unknown.
+
+    Includes the drafter's `title_prefix` (set by the Tier 5 dup detector
+    when the intake matches an existing spec at cosine ≥ 0.85) so the PR
+    title becomes e.g. ``[possible-dup] add csv export``.
+    """
     if result.drafted is None:
         return f"draft spec for issue #{result.issue}"
     # The drafter's `path` ends with `<slug>-design.md`; the slug captures
     # the title well enough for a PR title without re-threading the intake.
     name = result.drafted.path.rsplit("/", 1)[-1]
-    return name.removesuffix("-design.md").replace("-", " ")
+    base = name.removesuffix("-design.md").removesuffix("-fix.md").replace("-", " ")
+    prefix = (getattr(result.drafted, "title_prefix", "") or "").strip()
+    return f"{prefix} {base}".strip() if prefix else base
 
 
 def main() -> int:
