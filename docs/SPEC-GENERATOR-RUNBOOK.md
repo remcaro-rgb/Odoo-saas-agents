@@ -318,5 +318,44 @@ Replace the body with a clean feature request to exercise the draft path
 - [x] `sanitise()` replaces matches with `[REDACTED:<category>]`.
 - [x] Spend cap refuses new drafts above $50/week and at 80% warns.
 - [x] Better Stack dashboard JSON imports cleanly (validated locally).
+- [x] Spend cap enforced **live** end-to-end against the deployed agent —
+  see §9 drill 2026-05-28.
 - [ ] Adversarial test set (50+ payloads) passes against a live deployment.
 - [ ] Spend cap enforced under a 100-issue burst (load test).
+
+## 9. Drill log
+
+### Tier 6 spend-cap drill — 2026-05-28 — **PASS**
+
+End-to-end proof that the live `PostgresCostLedger` + `Budget` gate
+(merged in `Odoo-saas-agents` PR #16, control-plane wired via
+`CONTROL_PLANE_PG_DSN`) refuses to draft once the rolling 7-day spend
+crosses the $50 cap.
+
+Procedure (SQL applied via `apply-control-plane-ddl.yml` on
+`GoliattCo/odoo-custom`, dry-run-validated before each real apply):
+
+1. Seeded `spec_generator_runs` sentinel (`issue_number=-1`) at
+   `cost_usd=51.00, updated_at=NOW()` →
+   `infra/sql/2026-05-25-spec-gen-cost-cap-drill.sql` (`INSERT 0 1`,
+   weekly sum > $50).
+2. Re-ran the canary issue **#88** (`[tier6-cap-drill]`, in
+   `SPEC_GEN_ROLLOUT_FIXTURES` so the rollout decides `act`).
+3. Removed the sentinel →
+   `infra/sql/2026-05-25-spec-gen-cost-cap-cleanup.sql` (`DELETE 1`,
+   spend back to baseline). Normal operation resumed.
+
+Evidence (canary run `26384440802` structured log):
+
+```json
+{"decision":"act","stage":"fixtures","target":"88"}
+{"event":"outcome","issue":88,"shadow":false,"skip_reason":"spend_cap_reached","status":"escalated","duration_ms":2661}
+{"event":"note","text":"weekly spend $51.00 >= cap $50.00 — refuse-to-draft until rollover"}
+{"event":"state-recorded","issue":88,"phase":"escalated"}
+```
+
+Note — in `fixtures` stage, issues **not** in the allowlist are decided
+`SKIP` and exit before `handle_webhook`, so the budget gate is only
+exercised by an `act` (allowlisted) or `opt_in`/`default_on` run. The
+gate sits before the classifier and before any OpenCode call, so a
+capped run costs nothing.
